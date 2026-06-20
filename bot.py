@@ -13,6 +13,7 @@ import os
 import sqlite3
 import threading
 from dataclasses import dataclass
+from typing import Self, override
 
 from telegram import (
     InlineKeyboardButton,
@@ -32,152 +33,211 @@ from telegram.ext import (
 )
 
 # ════════════════════════════════════════════════
-#  تنظیمات با متغیرهای محیطی
+#  تنظیمات با متغیرهای محیطی (Python 3.14+)
 # ════════════════════════════════════════════════
 
-BOT_TOKEN: str = os.getenv("BOT_TOKEN")
+BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN environment variable is not set!")
+    msg = "❌ BOT_TOKEN environment variable is not set!"
+    raise ValueError(msg)
 
 ADMINS: list[int] = []
-admins_str = os.getenv("ADMINS", "")
+admins_str: str = os.getenv("ADMINS", "")
 if admins_str:
     ADMINS = [int(x.strip()) for x in admins_str.split(",") if x.strip()]
 if not ADMINS:
-    raise ValueError("❌ ADMINS environment variable is not set!")
+    msg = "❌ ADMINS environment variable is not set!"
+    raise ValueError(msg)
 
 DB_PATH: str = os.getenv("DB_PATH", "settings.db")
-PORT: int = int(os.getenv("PORT", 8443))
+PORT: int = int(os.getenv("PORT", "8443"))
 WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
 
 log = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════
-#  حالت‌های مکالمه
+#  حالت‌های مکالمه (با Type Aliases جدید پایتون 3.14)
 # ════════════════════════════════════════════════
 
-(
-    ST_MENU,        # انتخاب حالت فورواد
-    ST_PANEL,       # پنل مدیریت
-    ST_SRC,         # انتظار یوزرنیم منبع
-    ST_TGT,         # انتظار یوزرنیم مقصد
-) = range(4)
+type ConversationState = int
+
+ST_MENU: ConversationState = 0
+ST_PANEL: ConversationState = 1
+ST_SRC: ConversationState = 2
+ST_TGT: ConversationState = 3
 
 # ════════════════════════════════════════════════
-#  مدل داده
+#  مدل داده با slots و frozen (پایتون 3.14)
 # ════════════════════════════════════════════════
 
 @dataclass(slots=True, frozen=True)
 class Config:
-    mode:   str         # "gtc" = گروه→چنل  |  "ctg" = چنل→گروه
+    mode: str
     source: int | None
     target: int | None
     active: bool
 
     @property
     def ready(self) -> bool:
+        """آیا تنظیمات کامل است؟"""
         return self.source is not None and self.target is not None
 
     @property
     def mode_label(self) -> str:
+        """برچسب حالت فورواد"""
         return "گروه  →  چنل 📤" if self.mode == "gtc" else "چنل  →  گروه 📥"
 
 # ════════════════════════════════════════════════
-#  دیتابیس (thread-safe)
+#  دیتابیس (thread-safe با Context Manager)
 # ════════════════════════════════════════════════
 
 _lock = threading.Lock()
 
 def init_db() -> None:
-    with _lock, sqlite3.connect(DB_PATH) as cx:
-        cx.execute(
-            """
-            CREATE TABLE IF NOT EXISTS configs (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                mode    TEXT    NOT NULL UNIQUE,
-                source  INTEGER,
-                target  INTEGER,
-                active  INTEGER DEFAULT 0
-            )
-            """
-        )
-        for m in ("gtc", "ctg"):
+    """ایجاد جدول دیتابیس اگر وجود نداشته باشد"""
+    with _lock:
+        with sqlite3.connect(DB_PATH) as cx:
             cx.execute(
-                "INSERT OR IGNORE INTO configs (mode, source, target, active) VALUES (?, NULL, NULL, 0)",
-                (m,),
+                """
+                CREATE TABLE IF NOT EXISTS configs (
+                    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mode    TEXT    NOT NULL UNIQUE,
+                    source  INTEGER,
+                    target  INTEGER,
+                    active  INTEGER DEFAULT 0
+                )
+                """
             )
-        cx.commit()
+            for m in ("gtc", "ctg"):
+                cx.execute(
+                    "INSERT OR IGNORE INTO configs (mode, source, target, active) VALUES (?, NULL, NULL, 0)",
+                    (m,),
+                )
+            cx.commit()
 
 def db_get(mode: str) -> Config:
-    with _lock, sqlite3.connect(DB_PATH) as cx:
-        row = cx.execute(
-            "SELECT source, target, active FROM configs WHERE mode=?", (mode,)
-        ).fetchone()
+    """دریافت تنظیمات از دیتابیس"""
+    with _lock:
+        with sqlite3.connect(DB_PATH) as cx:
+            row = cx.execute(
+                "SELECT source, target, active FROM configs WHERE mode=?",
+                (mode,)
+            ).fetchone()
     if row:
         return Config(mode=mode, source=row[0], target=row[1], active=bool(row[2]))
     return Config(mode=mode, source=None, target=None, active=False)
 
 def db_set(mode: str, field: str, value: int | None) -> None:
+    """به‌روزرسانی تنظیمات در دیتابیس"""
+    # بررسی فیلد معتبر با match-case پایتون 3.14
     match field:
         case "source" | "target" | "active":
             pass
         case _:
-            raise ValueError(f"Unknown field: {field!r}")
-    with _lock, sqlite3.connect(DB_PATH) as cx:
-        cx.execute(
-            f"UPDATE configs SET {field}=? WHERE mode=?", (value, mode)
-        )
-        cx.commit()
+            msg = f"Unknown field: {field!r}"
+            raise ValueError(msg)
+    
+    with _lock:
+        with sqlite3.connect(DB_PATH) as cx:
+            cx.execute(
+                f"UPDATE configs SET {field}=? WHERE mode=?",
+                (value, mode)
+            )
+            cx.commit()
 
 # ════════════════════════════════════════════════
 #  ابزار: نرمال‌سازی یوزرنیم
 # ════════════════════════════════════════════════
 
 def normalize(text: str) -> str:
+    """نرمال‌سازی یوزرنیم از فرمت‌های مختلف"""
     if not text or not text.strip():
         return ""
-    t = text.strip()
-    for prefix in (
+    
+    t: str = text.strip()
+    prefixes: tuple[str, ...] = (
         "https://telegram.me/",
         "https://t.me/",
         "http://t.me/",
         "telegram.me/",
         "t.me/",
-    ):
+    )
+    
+    for prefix in prefixes:
         if t.lower().startswith(prefix):
             t = t[len(prefix):]
             break
+    
     t = t.lstrip("@").split("/")[0].split("?")[0]
     return f"@{t}" if t else ""
 
 # ════════════════════════════════════════════════
-#  کیبورد و متن (با style)
+#  کیبورد و متن (با style برای PTB)
 # ════════════════════════════════════════════════
 
 def mode_select_kb() -> InlineKeyboardMarkup:
+    """صفحه انتخاب حالت فورواد"""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 فورواد گروه  →  چنل", style="success", callback_data="mode_gtc")],
-        [InlineKeyboardButton("📥 فورواد چنل  →  گروه", style="primary", callback_data="mode_ctg")],
+        [
+            InlineKeyboardButton(
+                "📤 فورواد گروه  →  چنل",
+                style="success",
+                callback_data="mode_gtc"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📥 فورواد چنل  →  گروه",
+                style="primary",
+                callback_data="mode_ctg"
+            )
+        ],
     ])
 
 def panel_kb(mode: str) -> InlineKeyboardMarkup:
-    p = mode + ":"
+    """پنل مدیریت هر حالت"""
+    p: str = f"{mode}:"
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("▶️ شروع فورواد", style="success", callback_data=p + "start"),
-            InlineKeyboardButton("⏹ توقف فورواد", style="danger", callback_data=p + "stop"),
+            InlineKeyboardButton(
+                "▶️ شروع فورواد",
+                style="success",
+                callback_data=f"{p}start"
+            ),
+            InlineKeyboardButton(
+                "⏹ توقف فورواد",
+                style="danger",
+                callback_data=f"{p}stop"
+            ),
         ],
         [
-            InlineKeyboardButton("📥 تنظیم منبع", style="primary", callback_data=p + "set_src"),
-            InlineKeyboardButton("📤 تنظیم مقصد", style="primary", callback_data=p + "set_tgt"),
+            InlineKeyboardButton(
+                "📥 تنظیم منبع",
+                style="primary",
+                callback_data=f"{p}set_src"
+            ),
+            InlineKeyboardButton(
+                "📤 تنظیم مقصد",
+                style="primary",
+                callback_data=f"{p}set_tgt"
+            ),
         ],
         [
-            InlineKeyboardButton("📊 وضعیت", style="secondary", callback_data=p + "status"),
-            InlineKeyboardButton("🔙 بازگشت", style="secondary", callback_data="back"),
+            InlineKeyboardButton(
+                "📊 وضعیت",
+                style="secondary",
+                callback_data=f"{p}status"
+            ),
+            InlineKeyboardButton(
+                "🔙 بازگشت",
+                style="secondary",
+                callback_data="back"
+            ),
         ],
     ])
 
 def reply_kb() -> ReplyKeyboardMarkup:
+    """دکمه‌های پایین صفحه"""
     return ReplyKeyboardMarkup(
         [
             [
@@ -197,13 +257,18 @@ def reply_kb() -> ReplyKeyboardMarkup:
     )
 
 def panel_text(cfg: Config) -> str:
-    src = f"`{cfg.source}`" if cfg.source else "─ تنظیم نشده"
-    tgt = f"`{cfg.target}`" if cfg.target else "─ تنظیم نشده"
-    status = "✅ فعال" if cfg.active else "🔴 غیرفعال"
-    src_lbl, tgt_lbl = (
-        ("📥 گروه منبع", "📤 چنل مقصد") if cfg.mode == "gtc"
-        else ("📥 چنل منبع", "📤 گروه مقصد")
-    )
+    """متن نمایش وضعیت"""
+    src: str = f"`{cfg.source}`" if cfg.source else "─ تنظیم نشده"
+    tgt: str = f"`{cfg.target}`" if cfg.target else "─ تنظیم نشده"
+    status: str = "✅ فعال" if cfg.active else "🔴 غیرفعال"
+    
+    src_lbl: str
+    tgt_lbl: str
+    if cfg.mode == "gtc":
+        src_lbl, tgt_lbl = "📥 گروه منبع", "📤 چنل مقصد"
+    else:
+        src_lbl, tgt_lbl = "📥 چنل منبع", "📤 گروه مقصد"
+    
     return (
         f"╔══════════════════════╗\n"
         f"║  🎛  {cfg.mode_label:<18}║\n"
@@ -214,10 +279,11 @@ def panel_text(cfg: Config) -> str:
     )
 
 # ════════════════════════════════════════════════
-#  /start
+#  هندلرهای ربات
 # ════════════════════════════════════════════════
 
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> ConversationState:
+    """دستور /start"""
     if not update.effective_user or update.effective_user.id not in ADMINS:
         await update.message.reply_text("❌ شما دسترسی ندارید")
         return ConversationHandler.END
@@ -230,11 +296,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     )
     return ST_MENU
 
-# ════════════════════════════════════════════════
-#  هندلر دکمه‌های Inline
-# ════════════════════════════════════════════════
-
-async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> ConversationState:
+    """هندلر دکمه‌های Inline"""
     q = update.callback_query
     uid = q.from_user.id
     await q.answer()
@@ -243,14 +306,14 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await q.edit_message_text("❌ شما دسترسی ندارید")
         return ConversationHandler.END
 
-    data = q.data
+    data: str = q.data
 
-    # ── انتخاب حالت ───────────────────────────
+    # انتخاب حالت با match-case پایتون 3.14
     match data:
         case "mode_gtc" | "mode_ctg":
-            mode = data.split("_")[1]
+            mode: str = data.split("_")[1]
             ctx.user_data["mode"] = mode
-            cfg = db_get(mode)
+            cfg: Config = db_get(mode)
             await q.edit_message_text(
                 panel_text(cfg),
                 reply_markup=panel_kb(mode),
@@ -272,7 +335,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             )
             return ST_MENU
 
-    # ── دکمه‌های پنل — فرمت: {mode}:{action} ─
+    # دکمه‌های پنل با فرمت mode:action
     if ":" not in data:
         return ST_PANEL
 
@@ -281,10 +344,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     cfg = db_get(mode)
 
     match action:
-
         case "status":
             await q.edit_message_text(
-                "📊 *وضعیت فعلی*\n\n" + panel_text(cfg),
+                f"📊 *وضعیت فعلی*\n\n{panel_text(cfg)}",
                 reply_markup=panel_kb(mode),
                 parse_mode="Markdown",
             )
@@ -300,7 +362,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             db_set(mode, "active", 1)
             cfg = db_get(mode)
             await q.edit_message_text(
-                "✅ *فورواد فعال شد!*\n\n" + panel_text(cfg),
+                f"✅ *فورواد فعال شد!*\n\n{panel_text(cfg)}",
                 reply_markup=panel_kb(mode),
                 parse_mode="Markdown",
             )
@@ -310,14 +372,14 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             db_set(mode, "active", 0)
             cfg = db_get(mode)
             await q.edit_message_text(
-                "⏹ *فورواد متوقف شد*\n\n" + panel_text(cfg),
+                f"⏹ *فورواد متوقف شد*\n\n{panel_text(cfg)}",
                 reply_markup=panel_kb(mode),
                 parse_mode="Markdown",
             )
             log.info("■ [%s] Forwarding STOPPED by admin %s", mode, uid)
 
         case "set_src":
-            src_type = "گروه یا سوپرگروه" if mode == "gtc" else "چنل"
+            src_type: str = "گروه یا سوپرگروه" if mode == "gtc" else "چنل"
             await q.edit_message_text(
                 f"📥 *تنظیم منبع ({src_type})*\n\n"
                 f"یوزرنیم {src_type} را ارسال کن\n\n"
@@ -331,7 +393,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             return ST_SRC
 
         case "set_tgt":
-            tgt_type = "چنل" if mode == "gtc" else "گروه یا سوپرگروه"
+            tgt_type: str = "چنل" if mode == "gtc" else "گروه یا سوپرگروه"
+            admin_msg: str = "⚠️ ربات باید ادمین چنل باشد\n\n" if mode == "gtc" else "⚠️ ربات باید عضو گروه باشد\n\n"
             await q.edit_message_text(
                 f"📤 *تنظیم مقصد ({tgt_type})*\n\n"
                 f"یوزرنیم {tgt_type} را ارسال کن\n\n"
@@ -339,19 +402,16 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                 "`@username`\n"
                 "`t.me/username`\n"
                 "`https://t.me/username`\n\n"
-                + ("⚠️ ربات باید ادمین چنل باشد\n\n" if mode == "gtc" else "⚠️ ربات باید عضو گروه باشد\n\n")
-                + "برای انصراف /cancel بزن",
+                f"{admin_msg}"
+                "برای انصراف /cancel بزن",
                 parse_mode="Markdown",
             )
             return ST_TGT
 
     return ST_PANEL
 
-# ════════════════════════════════════════════════
-#  هندلر دکمه‌های Reply Keyboard
-# ════════════════════════════════════════════════
-
-async def on_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def on_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> ConversationState:
+    """هندلر دکمه‌های Reply Keyboard"""
     uid = update.effective_user.id
     text = update.message.text
     mode = ctx.user_data.get("mode")
@@ -361,8 +421,9 @@ async def on_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     cfg = db_get(mode)
 
-    match True:
-        case _ if "شروع فورواد" in text:
+    # استفاده از match-case پایتون 3.14 با شرط‌های مختلف
+    match text:
+        case text if "شروع فورواد" in text:
             match (cfg.source, cfg.target):
                 case (None, _):
                     await update.message.reply_text("⚠️ ابتدا منبع را تنظیم کن")
@@ -373,44 +434,44 @@ async def on_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             db_set(mode, "active", 1)
             cfg = db_get(mode)
             await update.message.reply_text(
-                "✅ *فورواد فعال شد!*\n\n" + panel_text(cfg),
+                f"✅ *فورواد فعال شد!*\n\n{panel_text(cfg)}",
                 reply_markup=panel_kb(mode),
                 parse_mode="Markdown",
             )
             log.info("▶ [%s] STARTED", mode)
 
-        case _ if "توقف فورواد" in text:
+        case text if "توقف فورواد" in text:
             db_set(mode, "active", 0)
             cfg = db_get(mode)
             await update.message.reply_text(
-                "⏹ *فورواد متوقف شد*\n\n" + panel_text(cfg),
+                f"⏹ *فورواد متوقف شد*\n\n{panel_text(cfg)}",
                 reply_markup=panel_kb(mode),
                 parse_mode="Markdown",
             )
             log.info("■ [%s] STOPPED", mode)
 
-        case _ if "تنظیم منبع" in text:
+        case text if "تنظیم منبع" in text:
             src_type = "گروه یا سوپرگروه" if mode == "gtc" else "چنل"
             await update.message.reply_text(
                 f"📥 یوزرنیم {src_type} را ارسال کن\n(مثال: @username یا t.me/username)\n\n/cancel برای انصراف"
             )
             return ST_SRC
 
-        case _ if "تنظیم مقصد" in text:
+        case text if "تنظیم مقصد" in text:
             tgt_type = "چنل" if mode == "gtc" else "گروه یا سوپرگروه"
             await update.message.reply_text(
                 f"📤 یوزرنیم {tgt_type} را ارسال کن\n(مثال: @username یا t.me/username)\n\n/cancel برای انصراف"
             )
             return ST_TGT
 
-        case _ if "وضعیت" in text:
+        case text if "وضعیت" in text:
             await update.message.reply_text(
-                "📊 *وضعیت فعلی*\n\n" + panel_text(cfg),
+                f"📊 *وضعیت فعلی*\n\n{panel_text(cfg)}",
                 reply_markup=panel_kb(mode),
                 parse_mode="Markdown",
             )
 
-        case _ if "بازگشت" in text:
+        case text if "بازگشت" in text:
             ctx.user_data.pop("mode", None)
             await update.message.reply_text(
                 "🤖 *ربات فورواردر دوطرفه*\n\nجهت فورواد را انتخاب کن:",
@@ -421,16 +482,13 @@ async def on_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     return ST_PANEL
 
-# ════════════════════════════════════════════════
-#  دریافت و اعتبارسنجی منبع
-# ════════════════════════════════════════════════
-
-async def recv_src(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def recv_src(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> ConversationState:
+    """دریافت و اعتبارسنجی منبع"""
     mode = ctx.user_data.get("mode")
     if not mode:
         return ConversationHandler.END
 
-    # اگر دکمه منو زده شد
+    # بررسی دکمه‌های منو
     if any(kw in update.message.text for kw in ["شروع", "توقف", "تنظیم", "وضعیت", "بازگشت"]):
         return await on_reply_kb(update, ctx)
 
@@ -456,7 +514,7 @@ async def recv_src(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ST_SRC
 
-    # اعتبارسنجی نوع برای منبع
+    # اعتبارسنجی نوع منبع با match-case
     match mode:
         case "gtc":  # منبع باید گروه باشد
             match chat.type:
@@ -474,22 +532,19 @@ async def recv_src(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     cfg = db_get(mode)
     log.info("[%s] Source → %s (%s)", mode, chat.title, chat.id)
     await update.message.reply_text(
-        f"✅ منبع «*{chat.title}*» با موفقیت وصل شد 🎉\n\n" + panel_text(cfg),
+        f"✅ منبع «*{chat.title}*» با موفقیت وصل شد 🎉\n\n{panel_text(cfg)}",
         reply_markup=panel_kb(mode),
         parse_mode="Markdown",
     )
     return ST_PANEL
 
-# ════════════════════════════════════════════════
-#  دریافت و اعتبارسنجی مقصد
-# ════════════════════════════════════════════════
-
-async def recv_tgt(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def recv_tgt(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> ConversationState:
+    """دریافت و اعتبارسنجی مقصد"""
     mode = ctx.user_data.get("mode")
     if not mode:
         return ConversationHandler.END
 
-    # اگر دکمه منو زده شد
+    # بررسی دکمه‌های منو
     if any(kw in update.message.text for kw in ["شروع", "توقف", "تنظیم", "وضعیت", "بازگشت"]):
         return await on_reply_kb(update, ctx)
 
@@ -515,13 +570,13 @@ async def recv_tgt(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ST_TGT
 
-    # اعتبارسنجی نوع برای مقصد
+    # اعتبارسنجی نوع مقصد
     match mode:
         case "gtc":  # مقصد باید چنل باشد
             if chat.type != "channel":
                 await update.message.reply_text("❌ این چنل نیست! یوزرنیم یک چنل وارد کن")
                 return ST_TGT
-            # چک ادمین بودن ربات در چنل
+            # بررسی ادمین بودن ربات در چنل
             try:
                 me = await ctx.bot.get_chat_member(chat.id, ctx.bot.id)
                 match me.status:
@@ -550,28 +605,27 @@ async def recv_tgt(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     cfg = db_get(mode)
     log.info("[%s] Target → %s (%s)", mode, chat.title, chat.id)
     await update.message.reply_text(
-        f"✅ مقصد «*{chat.title}*» با موفقیت وصل شد 🎉\n\n" + panel_text(cfg),
+        f"✅ مقصد «*{chat.title}*» با موفقیت وصل شد 🎉\n\n{panel_text(cfg)}",
         reply_markup=panel_kb(mode),
         parse_mode="Markdown",
     )
     return ST_PANEL
 
-# ════════════════════════════════════════════════
-#  لغو
-# ════════════════════════════════════════════════
-
-async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> ConversationState:
+    """لغو عملیات"""
     if not update.effective_user or update.effective_user.id not in ADMINS:
         return ConversationHandler.END
+    
     mode = ctx.user_data.get("mode")
     if mode:
         cfg = db_get(mode)
         await update.message.reply_text(
-            "🚫 عملیات لغو شد\n\n" + panel_text(cfg),
+            f"🚫 عملیات لغو شد\n\n{panel_text(cfg)}",
             reply_markup=panel_kb(mode),
             parse_mode="Markdown",
         )
         return ST_PANEL
+    
     await update.message.reply_text(
         "🚫 عملیات لغو شد\n\nجهت فورواد را انتخاب کن:",
         reply_markup=mode_select_kb(),
@@ -579,11 +633,8 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     )
     return ST_MENU
 
-# ════════════════════════════════════════════════
-#  فورواد پیام‌ها (هر دو جهت) - اصلاح شده
-# ════════════════════════════════════════════════
-
 async def do_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """فوروارد پیام‌ها از منبع به مقصد"""
     # تشخیص نوع پیام
     if update.channel_post:
         msg = update.channel_post
@@ -618,15 +669,16 @@ async def do_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 message_id=msg.message_id,
             )
             log.info("📨 [%s] msg#%s  %s → %s", mode, msg.message_id, cfg.source, cfg.target)
-            return  # فقط یک بار فوروارد کن
+            return
         except Exception as e:
             log.error("❌ [%s] Forward failed msg#%s: %s", mode, msg.message_id, e)
 
 # ════════════════════════════════════════════════
-#  اجرا - Webhook Mode (برای Render)
+#  اجرا با Webhook
 # ════════════════════════════════════════════════
 
 def main() -> None:
+    """تابع اصلی اجرای ربات"""
     # تنظیم لاگ
     logging.basicConfig(
         format="%(asctime)s | %(levelname)-8s | %(message)s",
@@ -643,7 +695,7 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # ⭐ فیلتر ساده برای همه پیام‌ها
+    # فیلتر ساده برای همه پیام‌ها
     fwd_filter = filters.ALL & ~filters.COMMAND
 
     conv = ConversationHandler(
@@ -684,10 +736,7 @@ def main() -> None:
     app.add_handler(conv, group=0)
     app.add_handler(MessageHandler(fwd_filter, do_forward), group=1)
 
-    # ═══════════════════════════════════════════
-    #  استفاده از Webhook برای Render
-    # ═══════════════════════════════════════════
-    
+    # استفاده از Webhook برای Render
     if WEBHOOK_URL:
         log.info("🌐 Setting up webhook...")
         app.run_webhook(
@@ -699,8 +748,10 @@ def main() -> None:
         )
     else:
         log.warning("⚠️ WEBHOOK_URL not set! Falling back to polling...")
-        log.warning("⚠️ For Render, set WEBHOOK_URL environment variable!")
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        app.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
 
 if __name__ == "__main__":
     main()
