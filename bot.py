@@ -1,289 +1,405 @@
-import os
-import json
-import requests
-from flask import Flask, request, Response
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import logging
+import sqlite3
+import threading
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
+    filters,
     ContextTypes,
-    filters
+    ConversationHandler,
 )
-import sqlite3
-import asyncio
-import threading
 
-# ======== تنظیمات ========
-TOKEN = "8637969459:AAHNqip3CO8Wv9iXXvXIJ1uFalvpB5cfsig"
-WEBHOOK_URL = "https://mnb-i2hm.onrender.com"
-ADMINS = [8296865861]  # آیدی عددی خودت رو جایگزین کن
+# ─── Config ───────────────────────────────────────────────────────────────────
 
-# ======== دیتابیس ========
-db = sqlite3.connect("db.sqlite", check_same_thread=False)
-cur = db.cursor()
+ADMINS = [8296865861]  # ← Replace with your actual admin Telegram user IDs
+BOT_TOKEN = "8637969459:AAHNqip3CO8Wv9iXXvXIJ1uFalvpB5cfsig"  # ← Replace with your bot token from @BotFather
+DB_PATH = "settings.db"
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS settings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source INTEGER,
-    target INTEGER,
-    active INTEGER DEFAULT 0
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
-""")
-db.commit()
+logger = logging.getLogger(__name__)
 
-def is_admin(user_id):
-    return user_id in ADMINS
+# ─── Conversation States ──────────────────────────────────────────────────────
 
-def get_settings():
-    cur.execute("SELECT source, target, active FROM settings WHERE id=1")
-    row = cur.fetchone()
+WAITING_SOURCE = 1
+WAITING_TARGET = 2
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+
+db_lock = threading.Lock()
+
+
+def init_db():
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source INTEGER,
+                target INTEGER,
+                active INTEGER DEFAULT 0
+            )
+            """
+        )
+        conn.commit()
+        # Insert a default row if none exists
+        row = conn.execute("SELECT COUNT(*) FROM settings").fetchone()
+        if row[0] == 0:
+            conn.execute("INSERT INTO settings (source, target, active) VALUES (NULL, NULL, 0)")
+            conn.commit()
+        conn.close()
+
+
+def get_settings() -> dict:
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT source, target, active FROM settings ORDER BY id LIMIT 1").fetchone()
+        conn.close()
     if row:
-        return row
-    cur.execute("INSERT INTO settings (id, source, target, active) VALUES (1, NULL, NULL, 0)")
-    db.commit()
-    return (None, None, 0)
+        return {"source": row[0], "target": row[1], "active": row[2]}
+    return {"source": None, "target": None, "active": 0}
 
-def save_settings(source=None, target=None, active=None):
-    s, t, a = get_settings()
-    cur.execute("""
-    INSERT OR REPLACE INTO settings (id, source, target, active)
-    VALUES (1, ?, ?, ?)
-    """, (
-        source if source is not None else s,
-        target if target is not None else t,
-        active if active is not None else a
-    ))
-    db.commit()
 
-# ======== اپلیکیشن تلگرام ========
-app = Application.builder().token(TOKEN).build()
+def set_source(chat_id: int):
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE settings SET source = ? WHERE id = 1", (chat_id,))
+        conn.commit()
+        conn.close()
 
-# ======== هندلرها ========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    print(f"Start command from user: {user_id}")
-    
-    if not is_admin(user_id):
-        await update.message.reply_text("❌ دسترسی نداری")
-        return
 
+def set_target(chat_id: int):
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE settings SET target = ? WHERE id = 1", (chat_id,))
+        conn.commit()
+        conn.close()
+
+
+def set_active(state: int):
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE settings SET active = ? WHERE id = 1", (state,))
+        conn.commit()
+        conn.close()
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def admin_panel_keyboard():
     keyboard = [
+        [InlineKeyboardButton("📥 تنظیم گروه", callback_data="set_source")],
+        [InlineKeyboardButton("📤 تنظیم چنل", callback_data="set_target")],
         [
-            InlineKeyboardButton("📥 تنظیم گروه", callback_data="set_group"),
-            InlineKeyboardButton("📤 تنظیم چنل", callback_data="set_channel")
+            InlineKeyboardButton("▶️ شروع فورواد", callback_data="start_forward"),
+            InlineKeyboardButton("⏹ توقف فورواد", callback_data="stop_forward"),
         ],
-        [
-            InlineKeyboardButton("▶️ شروع فورواد", callback_data="start_fw"),
-            InlineKeyboardButton("⏹ توقف فورواد", callback_data="stop_fw")
-        ]
     ]
-    await update.message.reply_text(
-        "🎛 پنل مدیریت ربات\n\n"
-        "برای تنظیمات از دکمه‌ها استفاده کن:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(keyboard)
+
+
+def status_text(settings: dict) -> str:
+    source = f"`{settings['source']}`" if settings["source"] else "تنظیم نشده"
+    target = f"`{settings['target']}`" if settings["target"] else "تنظیم نشده"
+    active = "✅ فعال" if settings["active"] else "⏹ غیرفعال"
+    return (
+        f"🎛 *پنل مدیریت ربات*\n\n"
+        f"📥 گروه منبع: {source}\n"
+        f"📤 چنل مقصد: {target}\n"
+        f"🔄 وضعیت فورواد: {active}"
     )
 
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMINS
+
+
+# ─── Command Handlers ─────────────────────────────────────────────────────────
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("❌ دسترسی نداری")
+        return ConversationHandler.END
+
+    settings = get_settings()
+    await update.message.reply_text(
+        status_text(settings),
+        reply_markup=admin_panel_keyboard(),
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+
+# ─── Callback Handlers ────────────────────────────────────────────────────────
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user = query.from_user
 
-    if not is_admin(query.from_user.id):
+    if not is_admin(user.id):
         await query.edit_message_text("❌ دسترسی نداری")
-        return
+        return ConversationHandler.END
 
-    if query.data == "set_group":
-        context.user_data["mode"] = "set_group"
+    data = query.data
+
+    if data == "set_source":
         await query.edit_message_text(
             "📥 یوزرنیم گروه را ارسال کن (مثال: @mygroup)\n\n"
-            "⚠️ ربات باید در گروه عضو باشد و دسترسی ارسال پیام داشته باشد."
+            "برای انصراف /cancel بزن"
         )
-    elif query.data == "set_channel":
-        context.user_data["mode"] = "set_channel"
+        return WAITING_SOURCE
+
+    elif data == "set_target":
         await query.edit_message_text(
             "📤 یوزرنیم چنل را ارسال کن (مثال: @mychannel)\n\n"
-            "⚠️ ربات باید در چنل ادمین باشد."
+            "برای انصراف /cancel بزن"
         )
-    elif query.data == "start_fw":
-        save_settings(active=1)
-        await query.edit_message_text("✅ فورواد فعال شد")
-    elif query.data == "stop_fw":
-        save_settings(active=0)
-        await query.edit_message_text("⏹ فورواد متوقف شد")
+        return WAITING_TARGET
 
-async def capture_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id) or update.message.chat.type != "private":
-        return
+    elif data == "start_forward":
+        settings = get_settings()
+        if not settings["source"]:
+            await query.edit_message_text(
+                "❌ ابتدا گروه منبع را تنظیم کن",
+                reply_markup=admin_panel_keyboard(),
+            )
+            return ConversationHandler.END
+        if not settings["target"]:
+            await query.edit_message_text(
+                "❌ ابتدا چنل مقصد را تنظیم کن",
+                reply_markup=admin_panel_keyboard(),
+            )
+            return ConversationHandler.END
+        set_active(1)
+        settings = get_settings()
+        await query.edit_message_text(
+            "✅ فورواد فعال شد\n\n" + status_text(settings),
+            reply_markup=admin_panel_keyboard(),
+            parse_mode="Markdown",
+        )
+        logger.info("Forwarding activated by admin %s", user.id)
+        return ConversationHandler.END
 
-    mode = context.user_data.get("mode")
-    if not mode:
-        return
+    elif data == "stop_forward":
+        set_active(0)
+        settings = get_settings()
+        await query.edit_message_text(
+            "⏹ فورواد متوقف شد\n\n" + status_text(settings),
+            reply_markup=admin_panel_keyboard(),
+            parse_mode="Markdown",
+        )
+        logger.info("Forwarding deactivated by admin %s", user.id)
+        return ConversationHandler.END
+
+    return ConversationHandler.END
+
+
+# ─── Source Input Handler ─────────────────────────────────────────────────────
+
+async def receive_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        return ConversationHandler.END
 
     text = update.message.text.strip()
     if not text.startswith("@"):
-        await update.message.reply_text("❌ یوزرنیم باید با @ شروع شود")
-        return
-
-    try:
-        chat = await context.bot.get_chat(text)
-    except Exception as e:
-        await update.message.reply_text(f"❌ پیدا نشد یا ربات دسترسی ندارد\n\nخطا: {str(e)}")
-        return
-
-    if mode == "set_group":
-        if chat.type not in ["group", "supergroup"]:
-            await update.message.reply_text("❌ این یوزرنیم گروه نیست")
-            return
-        save_settings(source=chat.id)
-        context.user_data["mode"] = None
         await update.message.reply_text(
-            f"✅ گروه «{chat.title}» با موفقیت وصل شد\n"
-            f"آیدی: {chat.id}"
+            "❌ یوزرنیم باید با @ شروع بشه. دوباره امتحان کن یا /cancel بزن"
         )
-    elif mode == "set_channel":
+        return WAITING_SOURCE
+
+    bot: Bot = context.bot
+    try:
+        chat = await bot.get_chat(text)
+        if chat.type not in ("group", "supergroup"):
+            await update.message.reply_text(
+                "❌ این یوزرنیم گروه نیست. یوزرنیم یک گروه وارد کن"
+            )
+            return WAITING_SOURCE
+
+        set_source(chat.id)
+        settings = get_settings()
+        await update.message.reply_text(
+            f"✅ گروه «{chat.title}» با موفقیت وصل شد\n\n" + status_text(settings),
+            reply_markup=admin_panel_keyboard(),
+            parse_mode="Markdown",
+        )
+        logger.info("Source group set to %s (%s) by admin %s", chat.title, chat.id, user.id)
+        return ConversationHandler.END
+
+    except Exception as e:
+        logger.error("Error getting source chat %s: %s", text, e)
+        await update.message.reply_text(
+            "❌ گروه پیدا نشد. مطمئن شو ربات عضو گروه هست و یوزرنیم درسته.\n"
+            "دوباره امتحان کن یا /cancel بزن"
+        )
+        return WAITING_SOURCE
+
+
+# ─── Target Input Handler ─────────────────────────────────────────────────────
+
+async def receive_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        return ConversationHandler.END
+
+    text = update.message.text.strip()
+    if not text.startswith("@"):
+        await update.message.reply_text(
+            "❌ یوزرنیم باید با @ شروع بشه. دوباره امتحان کن یا /cancel بزن"
+        )
+        return WAITING_TARGET
+
+    bot: Bot = context.bot
+    try:
+        chat = await bot.get_chat(text)
         if chat.type != "channel":
-            await update.message.reply_text("❌ این یوزرنیم چنل نیست")
-            return
-        save_settings(target=chat.id)
-        context.user_data["mode"] = None
+            await update.message.reply_text(
+                "❌ این یوزرنیم چنل نیست. یوزرنیم یک چنل وارد کن"
+            )
+            return WAITING_TARGET
+
+        # Check if bot is admin in the channel
+        try:
+            bot_member = await bot.get_chat_member(chat.id, bot.id)
+            if bot_member.status not in ("administrator", "creator"):
+                await update.message.reply_text(
+                    "❌ ربات باید ادمین چنل باشه تا بتونه پیام بفرسته.\n"
+                    "ربات رو ادمین کن و دوباره امتحان کن"
+                )
+                return WAITING_TARGET
+        except Exception:
+            await update.message.reply_text(
+                "❌ ربات باید ادمین چنل باشه. ربات رو اضافه و ادمین کن"
+            )
+            return WAITING_TARGET
+
+        set_target(chat.id)
+        settings = get_settings()
         await update.message.reply_text(
-            f"✅ چنل «{chat.title}» با موفقیت وصل شد\n"
-            f"آیدی: {chat.id}"
+            f"✅ چنل «{chat.title}» با موفقیت وصل شد\n\n" + status_text(settings),
+            reply_markup=admin_panel_keyboard(),
+            parse_mode="Markdown",
         )
+        logger.info("Target channel set to %s (%s) by admin %s", chat.title, chat.id, user.id)
+        return ConversationHandler.END
 
-async def forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    source, target, active = get_settings()
-    if not active or not update.message or update.message.chat_id != source:
+    except Exception as e:
+        logger.error("Error getting target chat %s: %s", text, e)
+        await update.message.reply_text(
+            "❌ چنل پیدا نشد. مطمئن شو ربات ادمین چنل هست و یوزرنیم درسته.\n"
+            "دوباره امتحان کن یا /cancel بزن"
+        )
+        return WAITING_TARGET
+
+
+# ─── Cancel Handler ───────────────────────────────────────────────────────────
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        return ConversationHandler.END
+    settings = get_settings()
+    await update.message.reply_text(
+        "❌ عملیات لغو شد\n\n" + status_text(settings),
+        reply_markup=admin_panel_keyboard(),
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
+
+
+# ─── Message Forwarder ────────────────────────────────────────────────────────
+
+async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    settings = get_settings()
+
+    if not settings["active"]:
         return
+    if not settings["source"] or not settings["target"]:
+        return
+
+    message = update.message or update.channel_post
+    if not message:
+        return
+
+    chat_id = message.chat_id
+    if chat_id != settings["source"]:
+        return
+
+    target = settings["target"]
+    bot: Bot = context.bot
+
     try:
-        await update.message.forward(chat_id=target)
-        print(f"Forwarded message from {source} to {target}")
-    except Exception as e:
-        print(f"Forward error: {e}")
-
-# اضافه کردن هندلرها
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(buttons))
-app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, capture_username))
-app.add_handler(MessageHandler(filters.ALL & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP), forward))
-
-# ======== حل مشکل Async در Flask ========
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-
-def process_update_sync(update_data):
-    """پردازش آپدیت به صورت همزمان"""
-    try:
-        update = Update.de_json(update_data, app.bot)
-        # اجرای async در محیط sync
-        future = asyncio.run_coroutine_threadsafe(
-            app.process_update(update),
-            loop
+        await bot.forward_message(
+            chat_id=target,
+            from_chat_id=chat_id,
+            message_id=message.message_id,
         )
-        future.result(timeout=10)  # انتظار حداکثر 10 ثانیه
-        return True
+        logger.info(
+            "Forwarded message %s from chat %s to %s",
+            message.message_id,
+            chat_id,
+            target,
+        )
     except Exception as e:
-        print(f"Error processing update: {e}")
-        return False
+        logger.error("Failed to forward message %s: %s", message.message_id, e)
 
-# ======== Flask Server ========
-flask_app = Flask(__name__)
 
-@flask_app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    """دریافت آپدیت از تلگرام"""
-    try:
-        data = json.loads(request.data)
-        
-        # پردازش آپدیت
-        success = process_update_sync(data)
-        
-        if success:
-            return Response("ok", status=200)
-        else:
-            return Response("error", status=500)
-            
-    except Exception as e:
-        print(f"Error in webhook: {e}")
-        return Response(f"error: {e}", status=500)
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
-@flask_app.route("/", methods=["GET"])
-def index():
-    return "✅ Bot is running!"
+def main():
+    init_db()
 
-@flask_app.route("/setwebhook", methods=["GET"])
-def set_webhook():
-    """تنظیم وب‌هوک"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
-        params = {"url": f"{WEBHOOK_URL}/{TOKEN}"}
-        response = requests.get(url, params=params)
-        return f"Webhook response: {response.json()}"
-    except Exception as e:
-        return f"Error: {e}"
+    app = Application.builder().token(BOT_TOKEN).build()
 
-@flask_app.route("/getwebhook", methods=["GET"])
-def get_webhook():
-    """بررسی وضعیت وب‌هوک"""
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo"
-        response = requests.get(url)
-        return response.json()
-    except Exception as e:
-        return f"Error: {e}"
+    conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("start", start),
+            CallbackQueryHandler(button_callback),
+        ],
+        states={
+            WAITING_SOURCE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_source),
+                CommandHandler("cancel", cancel),
+            ],
+            WAITING_TARGET: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_target),
+                CommandHandler("cancel", cancel),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("start", start),
+        ],
+        per_chat=True,
+    )
 
-@flask_app.route("/status", methods=["GET"])
-def status():
-    """وضعیت ربات"""
-    source, target, active = get_settings()
-    return {
-        "status": "running",
-        "source": source,
-        "target": target,
-        "active": bool(active),
-        "admins": ADMINS
-    }
+    app.add_handler(conv_handler)
 
-# ======== اجرا ========
+    # Forward messages from any group/channel
+    app.add_handler(
+        MessageHandler(
+            (filters.ChatType.GROUPS | filters.ChatType.CHANNEL)
+            & (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL
+               | filters.AUDIO | filters.VOICE | filters.VIDEO_NOTE | filters.Sticker.ALL),
+            forward_message,
+        ),
+        group=1,
+    )
+
+    logger.info("Bot started with polling...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
 if __name__ == "__main__":
-    PORT = int(os.environ.get("PORT", 10000))
-    
-    print("=" * 50)
-    print("🤖 Bot Starting...")
-    print("=" * 50)
-    
-    # شروع event loop در یک thread جداگانه
-    def start_loop():
-        asyncio.set_event_loop(loop)
-        loop.run_forever()
-    
-    thread = threading.Thread(target=start_loop, daemon=True)
-    thread.start()
-    
-    # تنظیم وب‌هوک
-    print("📡 Setting webhook...")
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
-        params = {"url": f"{WEBHOOK_URL}/{TOKEN}"}
-        response = requests.get(url, params=params)
-        print(f"✅ Webhook response: {response.json()}")
-    except Exception as e:
-        print(f"❌ Error setting webhook: {e}")
-    
-    # اطلاعات وب‌هوک
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo"
-        response = requests.get(url)
-        print(f"📊 Webhook info: {response.json()}")
-    except Exception as e:
-        print(f"❌ Error getting webhook info: {e}")
-    
-    print("=" * 50)
-    print(f"🚀 Starting Flask server on port {PORT}...")
-    print(f"🌐 Webhook URL: {WEBHOOK_URL}/{TOKEN}")
-    print("=" * 50)
-    
-    # اجرای Flask
-    flask_app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
+    main()
