@@ -1,7 +1,8 @@
 import os
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
@@ -10,21 +11,19 @@ from telegram.ext import (
 )
 import sqlite3
 
-# ======== تنظیمات ========
 TOKEN = "8574884910:AAFFID6HrOcElqnJTBHZLQ3W_56gFQ_IKaA"
-WEBHOOK_URL = "https://cod-end.onrender.com"  # آدرس رندر خودت
-ADMINS = [601668306, 8588773170]
+WEBHOOK_URL = "https://mnb-i2hm.onrender.com"
+ADMINS = [601668306]  # فقط آیدی صحیح را قرار دهید
 
-# ======== دیتابیس ========
 db = sqlite3.connect("db.sqlite", check_same_thread=False)
 cur = db.cursor()
 
 cur.execute("""
 CREATE TABLE IF NOT EXISTS settings (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     source INTEGER,
     target INTEGER,
-    active INTEGER
+    active INTEGER DEFAULT 0
 )
 """)
 db.commit()
@@ -49,7 +48,6 @@ def save_settings(source=None, target=None, active=None):
     ))
     db.commit()
 
-# ======== پنل و دکمه‌ها ========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ دسترسی نداری")
@@ -130,20 +128,22 @@ async def forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print("Forward error:", e)
 
-# ======== اجرا وب‌هوک ========
+# ======== اجرا ========
 PORT = int(os.environ.get("PORT", 8443))
 
-app = ApplicationBuilder().token(TOKEN).build()
+app = Application.builder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CallbackQueryHandler(buttons))
 app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, capture_username))
-app.add_handler(MessageHandler(filters.ALL & filters.ChatType.GROUPS, forward))
+app.add_handler(MessageHandler(filters.ALL & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP), forward))
 
-print("Bot is running on webhook...")
+async def main():
+    await app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}")
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN
+    )
 
-app.run_webhook(
-    listen="0.0.0.0",
-    port=PORT,
-    url_path=TOKEN,
-    webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
-)
+if __name__ == "__main__":
+    asyncio.run(main())
