@@ -1,8 +1,8 @@
 """
-╔══════════════════════════════════════════════╗
-║        ربات فورواردر تلگرام  🤖              ║
-║  python-telegram-bot 22+  |  Python 3.11+    ║
-╚══════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════╗
+║         ربات فورواردر تلگرام  🤖                ║
+║  python-telegram-bot 22+  |  Python 3.14+        ║
+╚══════════════════════════════════════════════════╝
 
 تنظیمات اجباری:
   BOT_TOKEN  ← توکن از @BotFather
@@ -13,36 +13,38 @@
 #  1.  کتابخانه‌ها
 # ════════════════════════════════════════════════
 
+from __future__ import annotations
+
 import logging
 import sqlite3
 import threading
+from dataclasses import dataclass
 
 from telegram import (
-    Update,
     Bot,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
+    Update,
 )
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
+    CommandHandler,
     ConversationHandler,
-    filters,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 # ════════════════════════════════════════════════
 #  2.  تنظیمات اصلی  ← اینجا رو عوض کن
 # ════════════════════════════════════════════════
 
-BOT_TOKEN = "8637969459:AAHNqip3CO8Wv9iXXvXIJ1uFalvpB5cfsig"   # توکن از @BotFather
-ADMINS    = [8296865861]              # آیدی عددی ادمین (می‌تونی چند تا بذاری)
-DB_PATH   = "settings.db"
+BOT_TOKEN: str = "8637969459:AAHNqip3CO8Wv9iXXvXIJ1uFalvpB5cfsig"   # توکن از @BotFather
+ADMINS: list[int] = [8296865861]           # آیدی عددی ادمین‌ها
+DB_PATH: str = "settings.db"
 
 # ════════════════════════════════════════════════
 #  3.  لاگ
@@ -55,7 +57,21 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════
-#  4.  دیتابیس (thread-safe)
+#  4.  مدل داده (Python 3.14 dataclass)
+# ════════════════════════════════════════════════
+
+@dataclass(slots=True, frozen=True)
+class Settings:
+    source: int | None
+    target: int | None
+    active: bool
+
+    @property
+    def ready(self) -> bool:
+        return self.source is not None and self.target is not None
+
+# ════════════════════════════════════════════════
+#  5.  دیتابیس (thread-safe)
 # ════════════════════════════════════════════════
 
 _lock = threading.Lock()
@@ -74,51 +90,56 @@ def init_db() -> None:
             """
         )
         if cx.execute("SELECT COUNT(*) FROM settings").fetchone()[0] == 0:
-            cx.execute("INSERT INTO settings (source, target, active) VALUES (NULL, NULL, 0)")
+            cx.execute(
+                "INSERT INTO settings (source, target, active) VALUES (NULL, NULL, 0)"
+            )
         cx.commit()
 
 
-def db_get() -> dict:
+def db_get() -> Settings:
     with _lock, sqlite3.connect(DB_PATH) as cx:
-        r = cx.execute("SELECT source, target, active FROM settings LIMIT 1").fetchone()
-    return {"source": r[0], "target": r[1], "active": r[2]} if r else {"source": None, "target": None, "active": 0}
+        row = cx.execute(
+            "SELECT source, target, active FROM settings LIMIT 1"
+        ).fetchone()
+    if row:
+        return Settings(source=row[0], target=row[1], active=bool(row[2]))
+    return Settings(source=None, target=None, active=False)
 
 
-def db_set(field: str, value) -> None:
-    if field not in {"source", "target", "active"}:
-        raise ValueError(f"Unknown field: {field}")
+def db_set(field: str, value: int | None) -> None:
+    match field:
+        case "source" | "target" | "active":
+            pass
+        case _:
+            raise ValueError(f"Unknown field: {field!r}")
     with _lock, sqlite3.connect(DB_PATH) as cx:
         cx.execute(f"UPDATE settings SET {field} = ? WHERE id = 1", (value,))
         cx.commit()
 
 
 # ════════════════════════════════════════════════
-#  5.  حالت‌های مکالمه
+#  6.  حالت‌های مکالمه
 # ════════════════════════════════════════════════
 
 WAIT_SOURCE, WAIT_TARGET = range(2)
 
 # ════════════════════════════════════════════════
-#  6.  کیبورد و متن پنل
+#  7.  کیبورد و متن پنل
 # ════════════════════════════════════════════════
 
 def panel_inline_kb() -> InlineKeyboardMarkup:
     """دکمه‌های شیشه‌ای رنگی داخل پیام"""
     return InlineKeyboardMarkup([
         [
-            # سبز ← شروع فورواد
-            InlineKeyboardButton("▶️ شروع فورواد",  style="success", callback_data="start"),
-            # قرمز ← توقف فورواد
-            InlineKeyboardButton("⏹ توقف فورواد",   style="danger",  callback_data="stop"),
+            InlineKeyboardButton("▶️ شروع فورواد", style="success", callback_data="start"),
+            InlineKeyboardButton("⏹ توقف فورواد",  style="danger",  callback_data="stop"),
         ],
         [
-            # آبی ← تنظیم گروه
-            InlineKeyboardButton("📥 تنظیم گروه",   style="primary", callback_data="set_src"),
-            # آبی ← تنظیم چنل
-            InlineKeyboardButton("📤 تنظیم چنل",    style="primary", callback_data="set_tgt"),
+            InlineKeyboardButton("📥 تنظیم گروه",  style="primary", callback_data="set_src"),
+            InlineKeyboardButton("📤 تنظیم چنل",   style="primary", callback_data="set_tgt"),
         ],
         [
-            InlineKeyboardButton("🔄 بروزرسانی",    callback_data="refresh"),
+            InlineKeyboardButton("🔄 بروزرسانی",   callback_data="refresh"),
         ],
     ])
 
@@ -128,22 +149,22 @@ def panel_reply_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [
-                KeyboardButton("▶️ شروع فورواد",  style="success"),   # سبز
-                KeyboardButton("⏹ توقف فورواد",   style="danger"),    # قرمز
+                KeyboardButton("▶️ شروع فورواد", style="success"),  # سبز
+                KeyboardButton("⏹ توقف فورواد",  style="danger"),   # قرمز
             ],
             [
-                KeyboardButton("📥 تنظیم گروه",   style="primary"),   # آبی
-                KeyboardButton("📤 تنظیم چنل",    style="primary"),   # آبی
+                KeyboardButton("📥 تنظیم گروه",  style="primary"),  # آبی
+                KeyboardButton("📤 تنظیم چنل",   style="primary"),  # آبی
             ],
         ],
         resize_keyboard=True,
     )
 
 
-def panel_text(s: dict) -> str:
-    src    = f"`{s['source']}`"  if s["source"] else "─ تنظیم نشده"
-    tgt    = f"`{s['target']}`"  if s["target"] else "─ تنظیم نشده"
-    status = "✅ فعال"           if s["active"] else "🔴 غیرفعال"
+def panel_text(s: Settings) -> str:
+    src    = f"`{s.source}`" if s.source else "─ تنظیم نشده"
+    tgt    = f"`{s.target}`" if s.target else "─ تنظیم نشده"
+    status = "✅ فعال"       if s.active  else "🔴 غیرفعال"
     return (
         "╔══════════════════════╗\n"
         "║   🎛  پنل مدیریت     ║\n"
@@ -155,25 +176,20 @@ def panel_text(s: dict) -> str:
 
 
 # ════════════════════════════════════════════════
-#  7.  دستور /start
+#  8.  دستور /start
 # ════════════════════════════════════════════════
 
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if uid not in ADMINS:
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.effective_user.id not in ADMINS:
         await update.message.reply_text("❌ شما دسترسی ندارید")
         return ConversationHandler.END
 
     s = db_get()
-
-    # دکمه‌های پایین صفحه (رنگی)
     await update.message.reply_text(
         "🎛 *پنل مدیریت ربات*\nاز دکمه‌های پایین یا دکمه‌های زیر پیام استفاده کن:",
         reply_markup=panel_reply_kb(),
         parse_mode="Markdown",
     )
-
-    # دکمه‌های شیشه‌ای رنگی داخل پیام
     await update.message.reply_text(
         panel_text(s),
         reply_markup=panel_inline_kb(),
@@ -183,149 +199,148 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════
-#  8.  هندلر دکمه‌های شیشه‌ای (Inline)
+#  9.  هندلر دکمه‌های شیشه‌ای (Inline)
 # ════════════════════════════════════════════════
 
-async def on_inline_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q   = update.callback_query
-    uid = q.from_user.id
+async def on_inline_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
     await q.answer()
 
-    if uid not in ADMINS:
+    if q.from_user.id not in ADMINS:
         await q.edit_message_text("❌ شما دسترسی ندارید")
         return ConversationHandler.END
 
-    data = q.data
+    match q.data:
 
-    if data == "refresh":
-        s = db_get()
-        await q.edit_message_text(panel_text(s), reply_markup=panel_inline_kb(), parse_mode="Markdown")
-        return ConversationHandler.END
+        case "refresh":
+            s = db_get()
+            await q.edit_message_text(
+                panel_text(s), reply_markup=panel_inline_kb(), parse_mode="Markdown"
+            )
 
-    if data == "start":
-        s = db_get()
-        if not s["source"]:
-            await q.answer("⚠️ ابتدا گروه منبع را تنظیم کنید", show_alert=True)
-            return ConversationHandler.END
-        if not s["target"]:
-            await q.answer("⚠️ ابتدا چنل مقصد را تنظیم کنید", show_alert=True)
-            return ConversationHandler.END
-        db_set("active", 1)
-        s = db_get()
-        await q.edit_message_text(
-            "✅ *فورواد فعال شد!*\n\n" + panel_text(s),
-            reply_markup=panel_inline_kb(),
-            parse_mode="Markdown",
-        )
-        log.info("▶ Forwarding STARTED by admin %s", uid)
-        return ConversationHandler.END
+        case "start":
+            s = db_get()
+            match (s.source, s.target):
+                case (None, _):
+                    await q.answer("⚠️ ابتدا گروه منبع را تنظیم کنید", show_alert=True)
+                    return ConversationHandler.END
+                case (_, None):
+                    await q.answer("⚠️ ابتدا چنل مقصد را تنظیم کنید", show_alert=True)
+                    return ConversationHandler.END
+            db_set("active", 1)
+            s = db_get()
+            await q.edit_message_text(
+                "✅ *فورواد فعال شد!*\n\n" + panel_text(s),
+                reply_markup=panel_inline_kb(),
+                parse_mode="Markdown",
+            )
+            log.info("▶ Forwarding STARTED by admin %s", q.from_user.id)
 
-    if data == "stop":
-        db_set("active", 0)
-        s = db_get()
-        await q.edit_message_text(
-            "⏹ *فورواد متوقف شد*\n\n" + panel_text(s),
-            reply_markup=panel_inline_kb(),
-            parse_mode="Markdown",
-        )
-        log.info("■ Forwarding STOPPED by admin %s", uid)
-        return ConversationHandler.END
+        case "stop":
+            db_set("active", 0)
+            s = db_get()
+            await q.edit_message_text(
+                "⏹ *فورواد متوقف شد*\n\n" + panel_text(s),
+                reply_markup=panel_inline_kb(),
+                parse_mode="Markdown",
+            )
+            log.info("■ Forwarding STOPPED by admin %s", q.from_user.id)
 
-    if data == "set_src":
-        await q.edit_message_text(
-            "📥 *تنظیم گروه منبع*\n\n"
-            "یوزرنیم گروه را ارسال کن:\n"
-            "مثال: `@mygroup`\n\n"
-            "برای انصراف /cancel بزن",
-            parse_mode="Markdown",
-        )
-        return WAIT_SOURCE
+        case "set_src":
+            await q.edit_message_text(
+                "📥 *تنظیم گروه منبع*\n\n"
+                "یوزرنیم گروه را ارسال کن:\n"
+                "مثال: `@mygroup`\n\n"
+                "برای انصراف /cancel بزن",
+                parse_mode="Markdown",
+            )
+            return WAIT_SOURCE
 
-    if data == "set_tgt":
-        await q.edit_message_text(
-            "📤 *تنظیم چنل مقصد*\n\n"
-            "یوزرنیم چنل را ارسال کن:\n"
-            "مثال: `@mychannel`\n\n"
-            "⚠️ ربات باید ادمین چنل باشد\n\n"
-            "برای انصراف /cancel بزن",
-            parse_mode="Markdown",
-        )
-        return WAIT_TARGET
+        case "set_tgt":
+            await q.edit_message_text(
+                "📤 *تنظیم چنل مقصد*\n\n"
+                "یوزرنیم چنل را ارسال کن:\n"
+                "مثال: `@mychannel`\n\n"
+                "⚠️ ربات باید ادمین چنل باشد\n\n"
+                "برای انصراف /cancel بزن",
+                parse_mode="Markdown",
+            )
+            return WAIT_TARGET
 
     return ConversationHandler.END
 
 
 # ════════════════════════════════════════════════
-#  9.  هندلر دکمه‌های پایین صفحه (Reply Keyboard)
+#  10. هندلر دکمه‌های پایین صفحه (Reply Keyboard)
 # ════════════════════════════════════════════════
 
-async def on_reply_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
+async def on_reply_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.effective_user.id not in ADMINS:
+        return ConversationHandler.END
+
     text = update.message.text
 
-    if uid not in ADMINS:
-        return ConversationHandler.END
+    match True:
+        case _ if "شروع فورواد" in text:
+            s = db_get()
+            match (s.source, s.target):
+                case (None, _):
+                    await update.message.reply_text("⚠️ ابتدا گروه منبع را تنظیم کن")
+                    return ConversationHandler.END
+                case (_, None):
+                    await update.message.reply_text("⚠️ ابتدا چنل مقصد را تنظیم کن")
+                    return ConversationHandler.END
+            db_set("active", 1)
+            s = db_get()
+            await update.message.reply_text(
+                "✅ *فورواد فعال شد!*\n\n" + panel_text(s),
+                reply_markup=panel_inline_kb(),
+                parse_mode="Markdown",
+            )
+            log.info("▶ Forwarding STARTED by admin %s", update.effective_user.id)
 
-    if "شروع فورواد" in text:
-        s = db_get()
-        if not s["source"]:
-            await update.message.reply_text("⚠️ ابتدا گروه منبع را تنظیم کن")
-            return ConversationHandler.END
-        if not s["target"]:
-            await update.message.reply_text("⚠️ ابتدا چنل مقصد را تنظیم کن")
-            return ConversationHandler.END
-        db_set("active", 1)
-        s = db_get()
-        await update.message.reply_text(
-            "✅ *فورواد فعال شد!*\n\n" + panel_text(s),
-            reply_markup=panel_inline_kb(),
-            parse_mode="Markdown",
-        )
-        log.info("▶ Forwarding STARTED by admin %s", uid)
+        case _ if "توقف فورواد" in text:
+            db_set("active", 0)
+            s = db_get()
+            await update.message.reply_text(
+                "⏹ *فورواد متوقف شد*\n\n" + panel_text(s),
+                reply_markup=panel_inline_kb(),
+                parse_mode="Markdown",
+            )
+            log.info("■ Forwarding STOPPED by admin %s", update.effective_user.id)
 
-    elif "توقف فورواد" in text:
-        db_set("active", 0)
-        s = db_get()
-        await update.message.reply_text(
-            "⏹ *فورواد متوقف شد*\n\n" + panel_text(s),
-            reply_markup=panel_inline_kb(),
-            parse_mode="Markdown",
-        )
-        log.info("■ Forwarding STOPPED by admin %s", uid)
+        case _ if "تنظیم گروه" in text:
+            await update.message.reply_text(
+                "📥 *تنظیم گروه منبع*\n\n"
+                "یوزرنیم گروه را ارسال کن:\n"
+                "مثال: `@mygroup`\n\n"
+                "برای انصراف /cancel بزن",
+                parse_mode="Markdown",
+            )
+            return WAIT_SOURCE
 
-    elif "تنظیم گروه" in text:
-        await update.message.reply_text(
-            "📥 *تنظیم گروه منبع*\n\n"
-            "یوزرنیم گروه را ارسال کن:\n"
-            "مثال: `@mygroup`\n\n"
-            "برای انصراف /cancel بزن",
-            parse_mode="Markdown",
-        )
-        return WAIT_SOURCE
-
-    elif "تنظیم چنل" in text:
-        await update.message.reply_text(
-            "📤 *تنظیم چنل مقصد*\n\n"
-            "یوزرنیم چنل را ارسال کن:\n"
-            "مثال: `@mychannel`\n\n"
-            "⚠️ ربات باید ادمین چنل باشد\n\n"
-            "برای انصراف /cancel بزن",
-            parse_mode="Markdown",
-        )
-        return WAIT_TARGET
+        case _ if "تنظیم چنل" in text:
+            await update.message.reply_text(
+                "📤 *تنظیم چنل مقصد*\n\n"
+                "یوزرنیم چنل را ارسال کن:\n"
+                "مثال: `@mychannel`\n\n"
+                "⚠️ ربات باید ادمین چنل باشد\n\n"
+                "برای انصراف /cancel بزن",
+                parse_mode="Markdown",
+            )
+            return WAIT_TARGET
 
     return ConversationHandler.END
 
 
 # ════════════════════════════════════════════════
-#  10. دریافت یوزرنیم گروه
+#  11. دریافت یوزرنیم گروه
 # ════════════════════════════════════════════════
 
-async def recv_source(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
+async def recv_source(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip()
 
-    # اگر یکی از دکمه‌های منو زده شد، دوباره روت کن
+    # اگر دکمه منو زده شد
     if any(kw in text for kw in ["شروع فورواد", "توقف فورواد", "تنظیم گروه", "تنظیم چنل"]):
         return await on_reply_button(update, ctx)
 
@@ -350,16 +365,19 @@ async def recv_source(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return WAIT_SOURCE
 
-    if chat.type not in ("group", "supergroup"):
-        await update.message.reply_text(
-            "❌ این یک گروه نیست!\n"
-            "یوزرنیم یک گروه یا سوپرگروه وارد کن"
-        )
-        return WAIT_SOURCE
+    match chat.type:
+        case "group" | "supergroup":
+            pass
+        case _:
+            await update.message.reply_text(
+                "❌ این یک گروه نیست!\n"
+                "یوزرنیم یک گروه یا سوپرگروه وارد کن"
+            )
+            return WAIT_SOURCE
 
     db_set("source", chat.id)
     s = db_get()
-    log.info("📥 Source set to %s (%s) by %s", chat.title, chat.id, uid)
+    log.info("📥 Source → %s (%s)", chat.title, chat.id)
     await update.message.reply_text(
         f"✅ گروه «*{chat.title}*» با موفقیت وصل شد 🎉\n\n" + panel_text(s),
         reply_markup=panel_inline_kb(),
@@ -369,14 +387,13 @@ async def recv_source(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════
-#  11. دریافت یوزرنیم چنل
+#  12. دریافت یوزرنیم چنل
 # ════════════════════════════════════════════════
 
-async def recv_target(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
+async def recv_target(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip()
 
-    # اگر یکی از دکمه‌های منو زده شد، دوباره روت کن
+    # اگر دکمه منو زده شد
     if any(kw in text for kw in ["شروع فورواد", "توقف فورواد", "تنظیم گروه", "تنظیم چنل"]):
         return await on_reply_button(update, ctx)
 
@@ -411,8 +428,11 @@ async def recv_target(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # بررسی ادمین بودن ربات در چنل
     try:
         me = await ctx.bot.get_chat_member(chat.id, ctx.bot.id)
-        if me.status not in ("administrator", "creator"):
-            raise PermissionError("not admin")
+        match me.status:
+            case "administrator" | "creator":
+                pass
+            case _:
+                raise PermissionError("bot is not admin")
     except Exception:
         await update.message.reply_text(
             "❌ ربات ادمین چنل نیست!\n\n"
@@ -424,7 +444,7 @@ async def recv_target(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     db_set("target", chat.id)
     s = db_get()
-    log.info("📤 Target set to %s (%s) by %s", chat.title, chat.id, uid)
+    log.info("📤 Target → %s (%s)", chat.title, chat.id)
     await update.message.reply_text(
         f"✅ چنل «*{chat.title}*» با موفقیت وصل شد 🎉\n\n" + panel_text(s),
         reply_markup=panel_inline_kb(),
@@ -434,10 +454,10 @@ async def recv_target(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════
-#  12. لغو عملیات
+#  13. لغو عملیات
 # ════════════════════════════════════════════════
 
-async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id not in ADMINS:
         return ConversationHandler.END
     s = db_get()
@@ -450,40 +470,39 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ════════════════════════════════════════════════
-#  13. فورواد پیام‌ها (گروه → چنل)
+#  14. فورواد پیام‌ها (گروه → چنل)
 # ════════════════════════════════════════════════
 
-async def do_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def do_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     s = db_get()
-    if not s["active"] or not s["source"] or not s["target"]:
+    if not s.active or not s.ready:
         return
 
     msg = update.message or update.channel_post
-    if not msg or msg.chat_id != s["source"]:
+    if msg is None or msg.chat_id != s.source:
         return
 
     try:
         await ctx.bot.forward_message(
-            chat_id=s["target"],
+            chat_id=s.target,
             from_chat_id=msg.chat_id,
             message_id=msg.message_id,
         )
-        log.info("📨 Forwarded msg#%s  [%s → %s]", msg.message_id, s["source"], s["target"])
+        log.info("📨 Forwarded msg#%s  [%s → %s]", msg.message_id, s.source, s.target)
     except Exception as e:
         log.error("❌ Forward failed msg#%s: %s", msg.message_id, e)
 
 
 # ════════════════════════════════════════════════
-#  14. اجرای ربات
+#  15. اجرای ربات
 # ════════════════════════════════════════════════
 
 def main() -> None:
     init_db()
-    log.info("🚀 Bot starting...")
+    log.info("🚀 Bot starting (Python 3.14 | PTB 22+)...")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # فیلتر پیام‌های قابل فورواد
     fwd_filter = (
         (filters.ChatType.GROUPS | filters.ChatType.CHANNEL)
         & (
@@ -499,7 +518,6 @@ def main() -> None:
         )
     )
 
-    # پنل ادمین (مکالمه اصلی)
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", cmd_start),
@@ -527,8 +545,8 @@ def main() -> None:
         allow_reentry=True,
     )
 
-    app.add_handler(conv,                                              group=0)
-    app.add_handler(MessageHandler(fwd_filter, do_forward),           group=1)
+    app.add_handler(conv,                                    group=0)
+    app.add_handler(MessageHandler(fwd_filter, do_forward),  group=1)
 
     log.info("✅ Bot is running (polling)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
