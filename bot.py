@@ -2,16 +2,14 @@
 ╔══════════════════════════════════════════════════╗
 ║         ربات فورواردر دوطرفه  🤖                ║
 ║  python-telegram-bot 22+  |  Python 3.14+        ║
+║  Web Service Mode (Render)                       ║
 ╚══════════════════════════════════════════════════╝
-
-تنظیمات اجباری:
-  BOT_TOKEN  ← توکن از @BotFather
-  ADMINS     ← آیدی عددی ادمین‌ها
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -34,21 +32,24 @@ from telegram.ext import (
 )
 
 # ════════════════════════════════════════════════
-#  تنظیمات  ← اینجا رو عوض کن
+#  تنظیمات با متغیرهای محیطی
 # ════════════════════════════════════════════════
 
-BOT_TOKEN: str       = "8637969459:AAGfc01Ngspfxu0B5Q3dJXKexSry8_0HiIU"
-ADMINS:    list[int] = [8296865861]
-DB_PATH:   str       = "settings.db"
+BOT_TOKEN: str = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN environment variable is not set!")
 
-# ════════════════════════════════════════════════
-#  لاگ
-# ════════════════════════════════════════════════
+ADMINS: list[int] = []
+admins_str = os.getenv("ADMINS", "")
+if admins_str:
+    ADMINS = [int(x.strip()) for x in admins_str.split(",") if x.strip()]
+if not ADMINS:
+    raise ValueError("❌ ADMINS environment variable is not set!")
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    level=logging.INFO,
-)
+DB_PATH: str = os.getenv("DB_PATH", "settings.db")
+PORT: int = int(os.getenv("PORT", 8443))
+WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
+
 log = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════
@@ -87,7 +88,6 @@ class Config:
 
 _lock = threading.Lock()
 
-
 def init_db() -> None:
     with _lock, sqlite3.connect(DB_PATH) as cx:
         cx.execute(
@@ -103,11 +103,10 @@ def init_db() -> None:
         )
         for m in ("gtc", "ctg"):
             cx.execute(
-                "INSERT OR IGNORE INTO configs (mode, source, target, active) VALUES (?,NULL,NULL,0)",
+                "INSERT OR IGNORE INTO configs (mode, source, target, active) VALUES (?, NULL, NULL, 0)",
                 (m,),
             )
         cx.commit()
-
 
 def db_get(mode: str) -> Config:
     with _lock, sqlite3.connect(DB_PATH) as cx:
@@ -117,7 +116,6 @@ def db_get(mode: str) -> Config:
     if row:
         return Config(mode=mode, source=row[0], target=row[1], active=bool(row[2]))
     return Config(mode=mode, source=None, target=None, active=False)
-
 
 def db_set(mode: str, field: str, value: int | None) -> None:
     match field:
@@ -136,14 +134,8 @@ def db_set(mode: str, field: str, value: int | None) -> None:
 # ════════════════════════════════════════════════
 
 def normalize(text: str) -> str:
-    """
-    قبول می‌کند:
-      @username
-      username
-      t.me/username
-      https://t.me/username
-      https://telegram.me/username
-    """
+    if not text or not text.strip():
+        return ""
     t = text.strip()
     for prefix in (
         "https://telegram.me/",
@@ -159,63 +151,57 @@ def normalize(text: str) -> str:
     return f"@{t}" if t else ""
 
 # ════════════════════════════════════════════════
-#  کیبورد و متن
+#  کیبورد و متن (بدون style)
 # ════════════════════════════════════════════════
 
 def mode_select_kb() -> InlineKeyboardMarkup:
-    """صفحه اول — انتخاب جهت فورواد"""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 فورواد گروه  →  چنل", style="success", callback_data="mode_gtc")],
-        [InlineKeyboardButton("📥 فورواد چنل  →  گروه", style="primary", callback_data="mode_ctg")],
+        [InlineKeyboardButton("📤 فورواد گروه  →  چنل", callback_data="mode_gtc")],
+        [InlineKeyboardButton("📥 فورواد چنل  →  گروه", callback_data="mode_ctg")],
     ])
 
-
 def panel_kb(mode: str) -> InlineKeyboardMarkup:
-    """پنل مدیریت هر حالت"""
     p = mode + ":"
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("▶️ شروع فورواد",   style="success", callback_data=p + "start"),
-            InlineKeyboardButton("⏹ توقف فورواد",    style="danger",  callback_data=p + "stop"),
+            InlineKeyboardButton("▶️ شروع فورواد", callback_data=p + "start"),
+            InlineKeyboardButton("⏹ توقف فورواد", callback_data=p + "stop"),
         ],
         [
-            InlineKeyboardButton("📥 تنظیم منبع",    style="primary", callback_data=p + "set_src"),
-            InlineKeyboardButton("📤 تنظیم مقصد",    style="primary", callback_data=p + "set_tgt"),
+            InlineKeyboardButton("📥 تنظیم منبع", callback_data=p + "set_src"),
+            InlineKeyboardButton("📤 تنظیم مقصد", callback_data=p + "set_tgt"),
         ],
         [
-            InlineKeyboardButton("📊 وضعیت فورواد",                   callback_data=p + "status"),
-            InlineKeyboardButton("🔙 بازگشت",                          callback_data="back"),
+            InlineKeyboardButton("📊 وضعیت", callback_data=p + "status"),
+            InlineKeyboardButton("🔙 بازگشت", callback_data="back"),
         ],
     ])
 
-
 def reply_kb() -> ReplyKeyboardMarkup:
-    """دکمه‌های پایین صفحه رنگی"""
     return ReplyKeyboardMarkup(
         [
             [
-                KeyboardButton("▶️ شروع فورواد", style="success"),
-                KeyboardButton("⏹ توقف فورواد",  style="danger"),
+                KeyboardButton("▶️ شروع فورواد"),
+                KeyboardButton("⏹ توقف فورواد"),
             ],
             [
-                KeyboardButton("📥 تنظیم منبع",  style="primary"),
-                KeyboardButton("📤 تنظیم مقصد",  style="primary"),
+                KeyboardButton("📥 تنظیم منبع"),
+                KeyboardButton("📤 تنظیم مقصد"),
             ],
             [
-                KeyboardButton("📊 وضعیت",       style="secondary"),
-                KeyboardButton("🔙 بازگشت",      style="secondary"),
+                KeyboardButton("📊 وضعیت"),
+                KeyboardButton("🔙 بازگشت"),
             ],
         ],
         resize_keyboard=True,
     )
 
-
 def panel_text(cfg: Config) -> str:
-    src    = f"`{cfg.source}`" if cfg.source else "─ تنظیم نشده"
-    tgt    = f"`{cfg.target}`" if cfg.target else "─ تنظیم نشده"
-    status = "✅ فعال"         if cfg.active  else "🔴 غیرفعال"
+    src = f"`{cfg.source}`" if cfg.source else "─ تنظیم نشده"
+    tgt = f"`{cfg.target}`" if cfg.target else "─ تنظیم نشده"
+    status = "✅ فعال" if cfg.active else "🔴 غیرفعال"
     src_lbl, tgt_lbl = (
-        ("📥 گروه منبع",  "📤 چنل مقصد")  if cfg.mode == "gtc"
+        ("📥 گروه منبع", "📤 چنل مقصد") if cfg.mode == "gtc"
         else ("📥 چنل منبع", "📤 گروه مقصد")
     )
     return (
@@ -232,14 +218,13 @@ def panel_text(cfg: Config) -> str:
 # ════════════════════════════════════════════════
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.effective_user.id not in ADMINS:
+    if not update.effective_user or update.effective_user.id not in ADMINS:
         await update.message.reply_text("❌ شما دسترسی ندارید")
         return ConversationHandler.END
 
     ctx.user_data.clear()
     await update.message.reply_text(
-        "🤖 *ربات فورواردر دوطرفه*\n\n"
-        "جهت فورواد را انتخاب کن:",
+        "🤖 *ربات فورواردر دوطرفه*\n\nجهت فورواد را انتخاب کن:",
         reply_markup=mode_select_kb(),
         parse_mode="Markdown",
     )
@@ -250,7 +235,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ════════════════════════════════════════════════
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    q   = update.callback_query
+    q = update.callback_query
     uid = q.from_user.id
     await q.answer()
 
@@ -271,7 +256,6 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                 reply_markup=panel_kb(mode),
                 parse_mode="Markdown",
             )
-            # دکمه‌های پایین صفحه
             await q.message.reply_text(
                 "از دکمه‌های پایین هم می‌تونی استفاده کنی:",
                 reply_markup=reply_kb(),
@@ -280,6 +264,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
         case "back":
             ctx.user_data.pop("mode", None)
+            await q.message.edit_reply_markup(reply_markup=None)
             await q.edit_message_text(
                 "🤖 *ربات فورواردر دوطرفه*\n\nجهت فورواد را انتخاب کن:",
                 reply_markup=mode_select_kb(),
@@ -367,7 +352,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ════════════════════════════════════════════════
 
 async def on_reply_kb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    uid  = update.effective_user.id
+    uid = update.effective_user.id
     text = update.message.text
     mode = ctx.user_data.get("mode")
 
@@ -576,7 +561,7 @@ async def recv_tgt(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ════════════════════════════════════════════════
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.effective_user.id not in ADMINS:
+    if not update.effective_user or update.effective_user.id not in ADMINS:
         return ConversationHandler.END
     mode = ctx.user_data.get("mode")
     if mode:
@@ -595,22 +580,37 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     return ST_MENU
 
 # ════════════════════════════════════════════════
-#  فورواد پیام‌ها (هر دو جهت)
+#  فورواد پیام‌ها (هر دو جهت) - اصلاح شده
 # ════════════════════════════════════════════════
 
 async def do_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.message or update.channel_post
+    # تشخیص نوع پیام
+    if update.channel_post:
+        msg = update.channel_post
+    elif update.message:
+        msg = update.message
+    else:
+        return
+    
     if msg is None:
         return
-
+    
     chat_id = msg.chat_id
 
+    # بررسی هر دو حالت
     for mode in ("gtc", "ctg"):
         cfg = db_get(mode)
-        if not cfg.active or not cfg.ready:
+        
+        if not cfg.active:
             continue
+            
+        if not cfg.ready:
+            continue
+            
         if chat_id != cfg.source:
             continue
+            
+        # فوروارد کردن
         try:
             await ctx.bot.forward_message(
                 chat_id=cfg.target,
@@ -618,33 +618,33 @@ async def do_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 message_id=msg.message_id,
             )
             log.info("📨 [%s] msg#%s  %s → %s", mode, msg.message_id, cfg.source, cfg.target)
+            return  # فقط یک بار فوروارد کن
         except Exception as e:
             log.error("❌ [%s] Forward failed msg#%s: %s", mode, msg.message_id, e)
 
 # ════════════════════════════════════════════════
-#  اجرا
+#  اجرا - Webhook Mode (برای Render)
 # ════════════════════════════════════════════════
 
 def main() -> None:
+    # تنظیم لاگ
+    logging.basicConfig(
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        level=logging.INFO,
+    )
+    
     init_db()
     log.info("🚀 Bot starting (Python 3.14 | PTB 22+)...")
+    log.info(f"📋 BOT_TOKEN: {'✅' if BOT_TOKEN else '❌'}")
+    log.info(f"📋 ADMINS: {ADMINS}")
+    log.info(f"📋 PORT: {PORT}")
+    log.info(f"📋 WEBHOOK_URL: {WEBHOOK_URL}")
+    log.info(f"📋 DB_PATH: {DB_PATH}")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    fwd_filter = (
-        (filters.ChatType.GROUPS | filters.ChatType.CHANNEL)
-        & (
-            filters.TEXT
-            | filters.PHOTO
-            | filters.VIDEO
-            | filters.Document.ALL
-            | filters.AUDIO
-            | filters.VOICE
-            | filters.VIDEO_NOTE
-            | filters.Sticker.ALL
-            | filters.ANIMATION
-        )
-    )
+    # فیلتر ساده برای همه پیام‌ها
+    fwd_filter = filters.ALL & ~filters.COMMAND
 
     conv = ConversationHandler(
         entry_points=[
@@ -675,18 +675,32 @@ def main() -> None:
         },
         fallbacks=[
             CommandHandler("cancel", cmd_cancel),
-            CommandHandler("start",  cmd_start),
+            CommandHandler("start", cmd_start),
         ],
         per_chat=True,
         allow_reentry=True,
     )
 
-    app.add_handler(conv,                                    group=0)
-    app.add_handler(MessageHandler(fwd_filter, do_forward),  group=1)
+    app.add_handler(conv, group=0)
+    app.add_handler(MessageHandler(fwd_filter, do_forward), group=1)
 
-    log.info("✅ Bot is running (polling)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
+    # ═══════════════════════════════════════════
+    #  استفاده از Webhook برای Render
+    # ═══════════════════════════════════════════
+    
+    if WEBHOOK_URL:
+        log.info("🌐 Setting up webhook...")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=BOT_TOKEN,
+            webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+            drop_pending_updates=True,
+        )
+    else:
+        log.warning("⚠️ WEBHOOK_URL not set! Falling back to polling...")
+        log.warning("⚠️ For Render, set WEBHOOK_URL environment variable!")
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
