@@ -1,18 +1,22 @@
 """
 ╔══════════════════════════════════════════════════╗
 ║         ربات فورواردر دوطرفه  🤖                ║
-║  python-telegram-bot 22+  |  Python 3.14+        ║
+║  python-telegram-bot 22.7+  |  Python 3.14+      ║
+║  حالت اجرا: Webhook (مخصوص Render Web Service)   ║
 ╚══════════════════════════════════════════════════╝
 
-تنظیمات اجباری:
-  BOT_TOKEN  ← توکن از @BotFather
-  ADMINS     ← آیدی عددی ادمین‌ها
+متغیرهای محیطی اجباری (در Render تنظیم کنید):
+  BOT_TOKEN     ← توکن از @BotFather
+  ADMINS        ← آیدی عددی ادمین‌ها (با کاما جدا کنید اگر چند نفرند)
+  WEBHOOK_URL   ← آدرس سرویس Render شما (مثل https://my-bot.onrender.com)
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
+import sys
 import threading
 from dataclasses import dataclass
 
@@ -34,14 +38,6 @@ from telegram.ext import (
 )
 
 # ════════════════════════════════════════════════
-#  تنظیمات  ← اینجا رو عوض کن
-# ════════════════════════════════════════════════
-
-BOT_TOKEN: str       = "8637969459:AAGPIy6LuqQ_ZqTCQXfjrgPa8fziEyouozQ"
-ADMINS:    list[int] = [8296865861]
-DB_PATH:   str       = "settings.db"
-
-# ════════════════════════════════════════════════
 #  لاگ
 # ════════════════════════════════════════════════
 
@@ -50,6 +46,34 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger(__name__)
+
+# ════════════════════════════════════════════════
+#  تنظیمات  ← از متغیرهای محیطی خوانده می‌شود
+# ════════════════════════════════════════════════
+
+BOT_TOKEN: str = os.environ.get("BOT_TOKEN", "").strip()
+
+_admins_raw = os.environ.get("ADMINS", "").strip()
+ADMINS: list[int] = [
+    int(part) for part in _admins_raw.split(",") if part.strip().lstrip("-").isdigit()
+]
+
+WEBHOOK_URL: str = os.environ.get("WEBHOOK_URL", "").strip().rstrip("/")
+
+# Render پورت واقعی را از طریق متغیر PORT تزریق می‌کند.
+PORT: int = int(os.environ.get("PORT", "8443"))
+
+DB_PATH: str = "settings.db"
+
+if not BOT_TOKEN:
+    log.critical("متغیر محیطی BOT_TOKEN تنظیم نشده است.")
+    sys.exit(1)
+if not ADMINS:
+    log.critical("متغیر محیطی ADMINS تنظیم نشده یا نامعتبر است.")
+    sys.exit(1)
+if not WEBHOOK_URL:
+    log.critical("متغیر محیطی WEBHOOK_URL تنظیم نشده است.")
+    sys.exit(1)
 
 # ════════════════════════════════════════════════
 #  حالت‌های مکالمه
@@ -160,6 +184,9 @@ def normalize(text: str) -> str:
 
 # ════════════════════════════════════════════════
 #  کیبورد و متن
+#  نکته: style فقط سه مقدار معتبر دارد: primary (آبی)، success (سبز)،
+#  danger (قرمز). از Bot API 9.4 (۹ فوریه ۲۰۲۶) و python-telegram-bot
+#  نسخه 22.7+ پشتیبانی می‌شود. مقدار "secondary" معتبر نیست و حذف شده.
 # ════════════════════════════════════════════════
 
 def mode_select_kb() -> InlineKeyboardMarkup:
@@ -202,8 +229,8 @@ def reply_kb() -> ReplyKeyboardMarkup:
                 KeyboardButton("📤 تنظیم مقصد",  style="primary"),
             ],
             [
-                KeyboardButton("📊 وضعیت",       style="secondary"),
-                KeyboardButton("🔙 بازگشت",      style="secondary"),
+                KeyboardButton("📊 وضعیت"),
+                KeyboardButton("🔙 بازگشت"),
             ],
         ],
         resize_keyboard=True,
@@ -622,12 +649,12 @@ async def do_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             log.error("❌ [%s] Forward failed msg#%s: %s", mode, msg.message_id, e)
 
 # ════════════════════════════════════════════════
-#  اجرا
+#  اجرا (Webhook - مخصوص Render Web Service)
 # ════════════════════════════════════════════════
 
 def main() -> None:
     init_db()
-    log.info("🚀 Bot starting (Python 3.14 | PTB 22+)...")
+    log.info("🚀 Bot starting (Python 3.14 | PTB 22.7+ | Webhook mode)...")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -684,8 +711,18 @@ def main() -> None:
     app.add_handler(conv,                                    group=0)
     app.add_handler(MessageHandler(fwd_filter, do_forward),  group=1)
 
-    log.info("✅ Bot is running (polling)...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    webhook_path = BOT_TOKEN
+    full_webhook_url = f"{WEBHOOK_URL}/{webhook_path}"
+
+    log.info("✅ Bot is running (webhook on port %s)...", PORT)
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=webhook_path,
+        webhook_url=full_webhook_url,
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
