@@ -1,5 +1,6 @@
 import os
 import json
+import requests
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -11,10 +12,14 @@ from telegram.ext import (
     filters
 )
 import sqlite3
+import asyncio
 
+# ======== تنظیمات ========
 TOKEN = "8637969459:AAHNqip3CO8Wv9iXXvXIJ1uFalvpB5cfsig"
-ADMINS = [8296865861]
+WEBHOOK_URL = "https://mnb-i2hm.onrender.com"  # آدرس رندر خودت
+ADMINS = [8296865861]  # آیدی عددی خودت رو جایگزین کن
 
+# ======== دیتابیس ========
 db = sqlite3.connect("db.sqlite", check_same_thread=False)
 cur = db.cursor()
 
@@ -52,11 +57,15 @@ def save_settings(source=None, target=None, active=None):
     ))
     db.commit()
 
-# ساخت اپلیکیشن تلگرام
+# ======== اپلیکیشن تلگرام ========
 app = Application.builder().token(TOKEN).build()
 
+# ======== هندلرها ========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    user_id = update.effective_user.id
+    print(f"Start command from user: {user_id}")
+    
+    if not is_admin(user_id):
         await update.message.reply_text("❌ دسترسی نداری")
         return
 
@@ -70,21 +79,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("⏹ توقف فورواد", callback_data="stop_fw")
         ]
     ]
-    await update.message.reply_text("🎛 پنل مدیریت ربات", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        "🎛 پنل مدیریت ربات\n\n"
+        "برای تنظیمات از دکمه‌ها استفاده کن:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     if not is_admin(query.from_user.id):
+        await query.edit_message_text("❌ دسترسی نداری")
         return
 
     if query.data == "set_group":
         context.user_data["mode"] = "set_group"
-        await query.edit_message_text("📥 یوزرنیم گروه را ارسال کن (مثال: @mygroup)")
+        await query.edit_message_text(
+            "📥 یوزرنیم گروه را ارسال کن (مثال: @mygroup)\n\n"
+            "⚠️ ربات باید در گروه عضو باشد و دسترسی ارسال پیام داشته باشد."
+        )
     elif query.data == "set_channel":
         context.user_data["mode"] = "set_channel"
-        await query.edit_message_text("📤 یوزرنیم چنل را ارسال کن (مثال: @mychannel)")
+        await query.edit_message_text(
+            "📤 یوزرنیم چنل را ارسال کن (مثال: @mychannel)\n\n"
+            "⚠️ ربات باید در چنل ادمین باشد."
+        )
     elif query.data == "start_fw":
         save_settings(active=1)
         await query.edit_message_text("✅ فورواد فعال شد")
@@ -108,7 +128,7 @@ async def capture_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat = await context.bot.get_chat(text)
     except Exception as e:
-        await update.message.reply_text(f"❌ پیدا نشد یا ربات دسترسی ندارد: {str(e)}")
+        await update.message.reply_text(f"❌ پیدا نشد یا ربات دسترسی ندارد\n\nخطا: {str(e)}")
         return
 
     if mode == "set_group":
@@ -117,14 +137,20 @@ async def capture_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         save_settings(source=chat.id)
         context.user_data["mode"] = None
-        await update.message.reply_text(f"✅ گروه «{chat.title}» با موفقیت وصل شد")
+        await update.message.reply_text(
+            f"✅ گروه «{chat.title}» با موفقیت وصل شد\n"
+            f"آیدی: {chat.id}"
+        )
     elif mode == "set_channel":
         if chat.type != "channel":
             await update.message.reply_text("❌ این یوزرنیم چنل نیست")
             return
         save_settings(target=chat.id)
         context.user_data["mode"] = None
-        await update.message.reply_text(f"✅ چنل «{chat.title}» با موفقیت وصل شد")
+        await update.message.reply_text(
+            f"✅ چنل «{chat.title}» با موفقیت وصل شد\n"
+            f"آیدی: {chat.id}"
+        )
 
 async def forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source, target, active = get_settings()
@@ -132,8 +158,9 @@ async def forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await update.message.forward(chat_id=target)
+        print(f"Forwarded message from {source} to {target}")
     except Exception as e:
-        print("Forward error:", e)
+        print(f"Forward error: {e}")
 
 # اضافه کردن هندلرها
 app.add_handler(CommandHandler("start", start))
@@ -145,12 +172,20 @@ app.add_handler(MessageHandler(filters.ALL & (filters.ChatType.GROUP | filters.C
 flask_app = Flask(__name__)
 
 @flask_app.route(f"/{TOKEN}", methods=["POST"])
-async def webhook():
+def webhook():
     """دریافت آپدیت از تلگرام"""
     try:
         data = json.loads(request.data)
         update = Update.de_json(data, app.bot)
-        await app.process_update(update)
+        
+        # اجرای async در محیط sync
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(app.process_update(update))
+        finally:
+            loop.close()
+        
         return "ok", 200
     except Exception as e:
         print(f"Error in webhook: {e}")
@@ -158,20 +193,70 @@ async def webhook():
 
 @flask_app.route("/", methods=["GET"])
 def index():
-    return "Bot is running!"
+    return "✅ Bot is running!"
 
+@flask_app.route("/setwebhook", methods=["GET"])
+def set_webhook():
+    """تنظیم وب‌هوک"""
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
+        params = {"url": f"{WEBHOOK_URL}/{TOKEN}"}
+        response = requests.get(url, params=params)
+        return f"Webhook response: {response.json()}"
+    except Exception as e:
+        return f"Error: {e}"
+
+@flask_app.route("/getwebhook", methods=["GET"])
+def get_webhook():
+    """بررسی وضعیت وب‌هوک"""
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo"
+        response = requests.get(url)
+        return response.json()
+    except Exception as e:
+        return f"Error: {e}"
+
+@flask_app.route("/status", methods=["GET"])
+def status():
+    """وضعیت ربات"""
+    source, target, active = get_settings()
+    return {
+        "status": "running",
+        "source": source,
+        "target": target,
+        "active": bool(active),
+        "admins": ADMINS
+    }
+
+# ======== اجرا ========
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 8443))
     
+    print("=" * 50)
+    print("🤖 Bot Starting...")
+    print("=" * 50)
+    
     # تنظیم وب‌هوک
-    import asyncio
-    WEBHOOK_URL = "https://cod-end.onrender.com"
+    print("📡 Setting webhook...")
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/setWebhook"
+        params = {"url": f"{WEBHOOK_URL}/{TOKEN}"}
+        response = requests.get(url, params=params)
+        print(f"✅ Webhook response: {response.json()}")
+    except Exception as e:
+        print(f"❌ Error setting webhook: {e}")
     
-    async def set_webhook():
-        await app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}")
-        print(f"Webhook set to: {WEBHOOK_URL}/{TOKEN}")
+    # اطلاعات وب‌هوک
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/getWebhookInfo"
+        response = requests.get(url)
+        print(f"📊 Webhook info: {response.json()}")
+    except Exception as e:
+        print(f"❌ Error getting webhook info: {e}")
     
-    asyncio.run(set_webhook())
+    print("=" * 50)
+    print(f"🚀 Starting Flask server on port {PORT}...")
+    print(f"🌐 Webhook URL: {WEBHOOK_URL}/{TOKEN}")
+    print("=" * 50)
     
-    # اجرای Flask
-    flask_app.run(host="0.0.0.0", port=PORT)
+    flask_app.run(host="0.0.0.0", port=PORT, debug=False)
