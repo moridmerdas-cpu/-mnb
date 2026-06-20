@@ -37,7 +37,7 @@ from telegram.ext import (
 #  تنظیمات  ← اینجا رو عوض کن
 # ════════════════════════════════════════════════
 
-BOT_TOKEN: str       = "8637969459:AAHNqip3CO8Wv9iXXvXIJ1uFalvpB5cfsig"
+BOT_TOKEN: str       = "8637969459:AAGfc01Ngspfxu0B5Q3dJXKexSry8_0HiIU"
 ADMINS:    list[int] = [8296865861]
 DB_PATH:   str       = "settings.db"
 
