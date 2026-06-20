@@ -37,9 +37,9 @@ from telegram.ext import (
 #  تنظیمات  ← اینجا رو عوض کن
 # ════════════════════════════════════════════════
 
-BOT_TOKEN: str       = "YOUR_BOT_TOKEN_HERE"
-ADMINS:    list[int] = [123456789]
-DB_PATH:   str       = "settings.db"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ADMINS = list(map(int, os.getenv("ADMINS", "123456789").split(",")))
+DB_PATH = os.getenv("DB_PATH", "settings.db")
 
 # ════════════════════════════════════════════════
 #  لاگ
