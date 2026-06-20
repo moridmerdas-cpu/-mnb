@@ -1,5 +1,6 @@
 import os
-import asyncio
+import json
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -12,7 +13,6 @@ from telegram.ext import (
 import sqlite3
 
 TOKEN = "8574884910:AAFFID6HrOcElqnJTBHZLQ3W_56gFQ_IKaA"
-WEBHOOK_URL = "https://mnb-i2hm.onrender.com"
 ADMINS = [601668306]
 
 db = sqlite3.connect("db.sqlite", check_same_thread=False)
@@ -51,6 +51,9 @@ def save_settings(source=None, target=None, active=None):
         active if active is not None else a
     ))
     db.commit()
+
+# ساخت اپلیکیشن تلگرام
+app = Application.builder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -132,23 +135,43 @@ async def forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print("Forward error:", e)
 
-# ======== اجرا ========
-PORT = int(os.environ.get("PORT", 8443))
+# اضافه کردن هندلرها
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(buttons))
+app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, capture_username))
+app.add_handler(MessageHandler(filters.ALL & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP), forward))
 
-def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(buttons))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, capture_username))
-    app.add_handler(MessageHandler(filters.ALL & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP), forward))
-    
-    print("Bot is starting...")
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
-    )
+# ======== Flask Server ========
+flask_app = Flask(__name__)
+
+@flask_app.route(f"/{TOKEN}", methods=["POST"])
+async def webhook():
+    """دریافت آپدیت از تلگرام"""
+    try:
+        data = json.loads(request.data)
+        update = Update.de_json(data, app.bot)
+        await app.process_update(update)
+        return "ok", 200
+    except Exception as e:
+        print(f"Error in webhook: {e}")
+        return "error", 500
+
+@flask_app.route("/", methods=["GET"])
+def index():
+    return "Bot is running!"
 
 if __name__ == "__main__":
-    main()
+    PORT = int(os.environ.get("PORT", 8443))
+    
+    # تنظیم وب‌هوک
+    import asyncio
+    WEBHOOK_URL = "https://cod-end.onrender.com"
+    
+    async def set_webhook():
+        await app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}")
+        print(f"Webhook set to: {WEBHOOK_URL}/{TOKEN}")
+    
+    asyncio.run(set_webhook())
+    
+    # اجرای Flask
+    flask_app.run(host="0.0.0.0", port=PORT)
