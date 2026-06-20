@@ -151,29 +151,29 @@ def normalize(text: str) -> str:
     return f"@{t}" if t else ""
 
 # ════════════════════════════════════════════════
-#  کیبورد و متن (بدون style)
+#  کیبورد و متن (با style)
 # ════════════════════════════════════════════════
 
 def mode_select_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 فورواد گروه  →  چنل", callback_data="mode_gtc")],
-        [InlineKeyboardButton("📥 فورواد چنل  →  گروه", callback_data="mode_ctg")],
+        [InlineKeyboardButton("📤 فورواد گروه  →  چنل", style="success", callback_data="mode_gtc")],
+        [InlineKeyboardButton("📥 فورواد چنل  →  گروه", style="primary", callback_data="mode_ctg")],
     ])
 
 def panel_kb(mode: str) -> InlineKeyboardMarkup:
     p = mode + ":"
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("▶️ شروع فورواد", callback_data=p + "start"),
-            InlineKeyboardButton("⏹ توقف فورواد", callback_data=p + "stop"),
+            InlineKeyboardButton("▶️ شروع فورواد", style="success", callback_data=p + "start"),
+            InlineKeyboardButton("⏹ توقف فورواد", style="danger", callback_data=p + "stop"),
         ],
         [
-            InlineKeyboardButton("📥 تنظیم منبع", callback_data=p + "set_src"),
-            InlineKeyboardButton("📤 تنظیم مقصد", callback_data=p + "set_tgt"),
+            InlineKeyboardButton("📥 تنظیم منبع", style="primary", callback_data=p + "set_src"),
+            InlineKeyboardButton("📤 تنظیم مقصد", style="primary", callback_data=p + "set_tgt"),
         ],
         [
-            InlineKeyboardButton("📊 وضعیت", callback_data=p + "status"),
-            InlineKeyboardButton("🔙 بازگشت", callback_data="back"),
+            InlineKeyboardButton("📊 وضعیت", style="secondary", callback_data=p + "status"),
+            InlineKeyboardButton("🔙 بازگشت", style="secondary", callback_data="back"),
         ],
     ])
 
@@ -181,16 +181,16 @@ def reply_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [
-                KeyboardButton("▶️ شروع فورواد"),
-                KeyboardButton("⏹ توقف فورواد"),
+                KeyboardButton("▶️ شروع فورواد", style="success"),
+                KeyboardButton("⏹ توقف فورواد", style="danger"),
             ],
             [
-                KeyboardButton("📥 تنظیم منبع"),
-                KeyboardButton("📤 تنظیم مقصد"),
+                KeyboardButton("📥 تنظیم منبع", style="primary"),
+                KeyboardButton("📤 تنظیم مقصد", style="primary"),
             ],
             [
-                KeyboardButton("📊 وضعیت"),
-                KeyboardButton("🔙 بازگشت"),
+                KeyboardButton("📊 وضعیت", style="secondary"),
+                KeyboardButton("🔙 بازگشت", style="secondary"),
             ],
         ],
         resize_keyboard=True,
@@ -643,7 +643,7 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # فیلتر ساده برای همه پیام‌ها
+    # ⭐ فیلتر ساده برای همه پیام‌ها
     fwd_filter = filters.ALL & ~filters.COMMAND
 
     conv = ConversationHandler(
