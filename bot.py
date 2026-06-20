@@ -12,8 +12,8 @@ from telegram.ext import (
 )
 import sqlite3
 
-TOKEN = "8574884910:AAFFID6HrOcElqnJTBHZLQ3W_56gFQ_IKaA"
-ADMINS = [601668306]
+TOKEN = "8637969459:AAHNqip3CO8Wv9iXXvXIJ1uFalvpB5cfsig"
+ADMINS = [8296865861]
 
 db = sqlite3.connect("db.sqlite", check_same_thread=False)
 cur = db.cursor()
