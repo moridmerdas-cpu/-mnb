@@ -1,7 +1,7 @@
 import os
 import json
 import requests
-from flask import Flask, request
+from flask import Flask, request, Response
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -13,10 +13,11 @@ from telegram.ext import (
 )
 import sqlite3
 import asyncio
+import threading
 
 # ======== تنظیمات ========
 TOKEN = "8637969459:AAHNqip3CO8Wv9iXXvXIJ1uFalvpB5cfsig"
-WEBHOOK_URL = "https://mnb-i2hm.onrender.com"  # آدرس رندر خودت
+WEBHOOK_URL = "https://mnb-i2hm.onrender.com"
 ADMINS = [8296865861]  # آیدی عددی خودت رو جایگزین کن
 
 # ======== دیتابیس ========
@@ -168,6 +169,25 @@ app.add_handler(CallbackQueryHandler(buttons))
 app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, capture_username))
 app.add_handler(MessageHandler(filters.ALL & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP), forward))
 
+# ======== حل مشکل Async در Flask ========
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+def process_update_sync(update_data):
+    """پردازش آپدیت به صورت همزمان"""
+    try:
+        update = Update.de_json(update_data, app.bot)
+        # اجرای async در محیط sync
+        future = asyncio.run_coroutine_threadsafe(
+            app.process_update(update),
+            loop
+        )
+        future.result(timeout=10)  # انتظار حداکثر 10 ثانیه
+        return True
+    except Exception as e:
+        print(f"Error processing update: {e}")
+        return False
+
 # ======== Flask Server ========
 flask_app = Flask(__name__)
 
@@ -176,20 +196,18 @@ def webhook():
     """دریافت آپدیت از تلگرام"""
     try:
         data = json.loads(request.data)
-        update = Update.de_json(data, app.bot)
         
-        # اجرای async در محیط sync
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(app.process_update(update))
-        finally:
-            loop.close()
+        # پردازش آپدیت
+        success = process_update_sync(data)
         
-        return "ok", 200
+        if success:
+            return Response("ok", status=200)
+        else:
+            return Response("error", status=500)
+            
     except Exception as e:
         print(f"Error in webhook: {e}")
-        return "error", 500
+        return Response(f"error: {e}", status=500)
 
 @flask_app.route("/", methods=["GET"])
 def index():
@@ -230,11 +248,19 @@ def status():
 
 # ======== اجرا ========
 if __name__ == "__main__":
-    PORT = int(os.environ.get("PORT", 8443))
+    PORT = int(os.environ.get("PORT", 10000))
     
     print("=" * 50)
     print("🤖 Bot Starting...")
     print("=" * 50)
+    
+    # شروع event loop در یک thread جداگانه
+    def start_loop():
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+    
+    thread = threading.Thread(target=start_loop, daemon=True)
+    thread.start()
     
     # تنظیم وب‌هوک
     print("📡 Setting webhook...")
@@ -259,4 +285,5 @@ if __name__ == "__main__":
     print(f"🌐 Webhook URL: {WEBHOOK_URL}/{TOKEN}")
     print("=" * 50)
     
-    flask_app.run(host="0.0.0.0", port=PORT, debug=False)
+    # اجرای Flask
+    flask_app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
