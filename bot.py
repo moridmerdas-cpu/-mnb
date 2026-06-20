@@ -13,7 +13,7 @@ import sqlite3
 
 TOKEN = "8574884910:AAFFID6HrOcElqnJTBHZLQ3W_56gFQ_IKaA"
 WEBHOOK_URL = "https://mnb-i2hm.onrender.com"
-ADMINS = [601668306]  # فقط آیدی صحیح را قرار دهید
+ADMINS = [601668306]
 
 db = sqlite3.connect("db.sqlite", check_same_thread=False)
 cur = db.cursor()
@@ -34,7 +34,11 @@ def is_admin(user_id):
 def get_settings():
     cur.execute("SELECT source, target, active FROM settings WHERE id=1")
     row = cur.fetchone()
-    return row if row else (None, None, 0)
+    if row:
+        return row
+    cur.execute("INSERT INTO settings (id, source, target, active) VALUES (1, NULL, NULL, 0)")
+    db.commit()
+    return (None, None, 0)
 
 def save_settings(source=None, target=None, active=None):
     s, t, a = get_settings()
@@ -100,8 +104,8 @@ async def capture_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         chat = await context.bot.get_chat(text)
-    except:
-        await update.message.reply_text("❌ پیدا نشد یا ربات دسترسی ندارد")
+    except Exception as e:
+        await update.message.reply_text(f"❌ پیدا نشد یا ربات دسترسی ندارد: {str(e)}")
         return
 
     if mode == "set_group":
@@ -131,19 +135,20 @@ async def forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ======== اجرا ========
 PORT = int(os.environ.get("PORT", 8443))
 
-app = Application.builder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(buttons))
-app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, capture_username))
-app.add_handler(MessageHandler(filters.ALL & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP), forward))
-
-async def main():
-    await app.bot.set_webhook(url=f"{WEBHOOK_URL}/{TOKEN}")
-    await app.run_webhook(
+def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(buttons))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, capture_username))
+    app.add_handler(MessageHandler(filters.ALL & (filters.ChatType.GROUP | filters.ChatType.SUPERGROUP), forward))
+    
+    print("Bot is starting...")
+    app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=TOKEN
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
     )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
